@@ -1,0 +1,35 @@
+# For more options and information see
+# http://rptl.io/configtxt
+
+# 64 位 AArch64
+arm_64bit=1
+
+# 加载我们自己的裸机内核
+kernel=kernel8.img
+
+# 开启串口
+enable_uart=1
+
+# Mini UART 的波特率依赖 VPU core clock
+# 固定为 250 MHz，和代码里的 AUX_MU_BAUD_REG = 270 对应
+core_freq=250
+core_freq_min=250
+
+# 不加载 Linux initramfs
+auto_initramfs=0
+
+# 关闭 Linux VC4/KMS 图形驱动
+# dtoverlay=vc4-kms-v3d
+# max_framebuffers=2
+# disable_fw_kms_setup=1
+
+# 可选：关闭彩虹启动画面
+disable_splash=1
+
+# 可选：关闭过扫描补偿
+disable_overscan=1
+
+# 裸机调试期间不建议动态超频
+arm_boost=0
+
+[all]

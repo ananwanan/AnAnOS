@@ -1,0 +1,5 @@
+# 构建输出目录
+/target
+
+# 内核镜像
+kernel8.img
