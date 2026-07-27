@@ -1,31 +1,55 @@
 #![no_std]
 #![no_main]
 
-mod uart;
+mod console;
+mod drivers;
 
 use core::arch::{asm, global_asm};
-use core::fmt::Write;
 use core::panic::PanicInfo;
 
-use uart::MiniUart;
+use drivers::uart::MiniUart;
 
 global_asm!(include_str!("../../boot/boot.S"));
 
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {
+        $crate::console::_print(core::format_args!($($arg)*))
+    };
+}
+
+#[macro_export]
+macro_rules! println {
+    () => {
+        $crate::print!("\n")
+    };
+
+    ($($arg:tt)*) => {
+        $crate::print!("{}\n", core::format_args!($($arg)*))
+    };
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
-    let mut uart = MiniUart::new();
+    let uart = MiniUart::new();
     uart.init();
 
-    uart.write_string("\n");
-    uart.write_string("================================\n");
-    uart.write_string("           AnanOS\n");
-    uart.write_string("================================\n");
-    uart.write_string("Boot successful!\n");
-    uart.write_string("CPU: Raspberry Pi 4B / BCM2711\n");
+    println!();
+    println!("================================");
+    println!("            AnanOS");
+    println!("================================");
 
-    writeln!(uart, "Device Tree: {dtb_address:#018x}").ok();
+    println!("[ OK ] Boot assembly");
+    println!("[ OK ] Kernel stack");
+    println!("[ OK ] BSS initialization");
+    println!("[ OK ] Mini UART");
+    println!();
 
-    uart.write_string("\nHello from Rust kernel!\n");
+    println!("Board       : Raspberry Pi 4B");
+    println!("Architecture: AArch64");
+    println!("DTB address : {dtb_address:#018x}");
+    println!();
+    println!("Welcome to AnanOS!");
 
     loop {
         unsafe {
@@ -35,12 +59,12 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
 }
 
 #[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    let mut uart = MiniUart::new();
-
-    // 如果 panic 出现在 UART 初始化之后，可以打印错误。
-    writeln!(uart, "\n[KERNEL PANIC]").ok();
-    writeln!(uart, "{info}").ok();
+fn panic(info: &PanicInfo<'_>) -> ! {
+    println!();
+    println!("================================");
+    println!("         KERNEL PANIC");
+    println!("================================");
+    println!("{info}");
 
     loop {
         unsafe {
