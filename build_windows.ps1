@@ -5,5 +5,5 @@ cargo build -p kernel
 rust-objcopy `
     --strip-all `
     -O binary `
-    target\aarch64-unknown-none\debug\kernel `
-    kernel8.img
+    target/aarch64-unknown-none/debug/kernel `
+    target/kernel8.img
