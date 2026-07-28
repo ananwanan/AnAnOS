@@ -1,4 +1,4 @@
-use core::ptr::write_volatile;
+use core::ptr::{read_volatile, write_volatile};
 
 use crate::drivers::mailbox::{Mailbox, MailboxError, REQUEST_CODE};
 
@@ -267,20 +267,35 @@ impl FrameBuffer {
 
     /// 使用同一种颜色填满屏幕。
     pub fn clear(&mut self, color: u32) {
-        for y in 0..self.height {
-            for x in 0..self.width {
-                self.put_pixel(x, y, color);
+        let pixel = self.encode_color(color);
+
+        for y in 0..self.height as usize {
+            let row = unsafe { self.address.add(y * self.pitch as usize).cast::<u32>() };
+
+            for x in 0..self.width as usize {
+                unsafe {
+                    write_volatile(row.add(x), pixel);
+                }
             }
         }
     }
 
     pub fn draw_rect(&mut self, x: u32, y: u32, width: u32, height: u32, color: u32) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+
         let end_x = x.saturating_add(width).min(self.width);
         let end_y = y.saturating_add(height).min(self.height);
+        let pixel = self.encode_color(color);
 
-        for py in y..end_y {
-            for px in x..end_x {
-                self.put_pixel(px, py, color);
+        for py in y as usize..end_y as usize {
+            let row = unsafe { self.address.add(py * self.pitch as usize).cast::<u32>() };
+
+            for px in x as usize..end_x as usize {
+                unsafe {
+                    write_volatile(row.add(px), pixel);
+                }
             }
         }
     }
@@ -390,6 +405,60 @@ impl FrameBuffer {
                     cursor_x = cursor_x.saturating_add(horizontal_advance);
                 }
             }
+        }
+    }
+
+    /// 将 framebuffer 内容向上滚动指定像素行。
+    pub fn scroll_up(&mut self, rows: u32, background: u32) {
+        if rows == 0 {
+            return;
+        }
+
+        if rows >= self.height {
+            self.clear(background);
+            return;
+        }
+
+        let bytes_per_row = self.pitch as usize;
+        let copy_rows = (self.height - rows) as usize;
+        let source_offset = rows as usize * bytes_per_row;
+
+        /*
+         * 源区域地址高于目标区域，因此从前向后复制是安全的。
+         * 这里使用 volatile，确保编译器不会优化掉显存访问。
+         */
+        for row in 0..copy_rows {
+            let source_row = source_offset + row * bytes_per_row;
+            let destination_row = row * bytes_per_row;
+
+            for byte_offset in (0..bytes_per_row).step_by(4) {
+                unsafe {
+                    let pixel =
+                        read_volatile(self.address.add(source_row + byte_offset).cast::<u32>());
+
+                    write_volatile(
+                        self.address
+                            .add(destination_row + byte_offset)
+                            .cast::<u32>(),
+                        pixel,
+                    );
+                }
+            }
+        }
+
+        // 清空滚动后底部留下的区域。
+        self.draw_rect(0, self.height - rows, self.width, rows, background);
+    }
+
+    #[inline(always)]
+    fn encode_color(&self, color: u32) -> u32 {
+        let red = (color >> 16) & 0xFF;
+        let green = (color >> 8) & 0xFF;
+        let blue = color & 0xFF;
+
+        match self.pixel_order {
+            PixelOrder::Rgb => (red << 16) | (green << 8) | blue,
+            PixelOrder::Bgr => (blue << 16) | (green << 8) | red,
         }
     }
 }

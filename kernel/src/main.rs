@@ -1,3 +1,4 @@
+#![allow(unused)]
 #![no_std]
 #![no_main]
 
@@ -55,6 +56,8 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
 
     init_framebuffer();
 
+    screen_test();
+
     println!("DTB address : {dtb_address:#018x}");
     println!();
     println!("Welcome to AnanOS!");
@@ -87,8 +90,9 @@ fn init_framebuffer() {
     println!("Initializing framebuffer...");
 
     match FrameBuffer::new(1920, 1080) {
-        Ok(mut framebuffer) => {
-            println!("[ OK ] Framebuffer");
+        Ok(framebuffer) => {
+            // 安装前，这些日志只输出到 UART。
+            println!("[ OK ] Framebuffer allocated");
             println!("Address    : {:#018x}", framebuffer.address());
             println!(
                 "Resolution : {}x{}",
@@ -100,53 +104,31 @@ fn init_framebuffer() {
             println!("Size       : {} bytes", framebuffer.size());
             println!("Pixel order: {:?}", framebuffer.pixel_order());
 
-            const BACKGROUND: u32 = 0x0018_2430;
-            const TITLE: u32 = 0x0060_A5FA;
-            const TEXT: u32 = 0x00F0_F4F8;
-            const SUCCESS: u32 = 0x0050_FA7B;
-            const PANEL: u32 = 0x0022_3040;
+            /*
+             * 安装时会清空屏幕。
+             * 从这一行之后，println! 同时输出到 UART 和 HDMI。
+             */
+            console::install_framebuffer(framebuffer);
 
-            framebuffer.clear(BACKGROUND);
-
-            framebuffer.draw_rect(60, 60, framebuffer.width().saturating_sub(120), 720, PANEL);
-
-            framebuffer.draw_string_scaled(110, 100, "ANANOS", TITLE, PANEL, 5);
-
-            framebuffer.draw_string_scaled(
-                110,
-                180,
-                "RUST BARE METAL OPERATING SYSTEM",
-                TEXT,
-                PANEL,
-                2,
-            );
-
-            framebuffer.draw_string_scaled(
-                110,
-                270,
-                "[OK] BOOT ASSEMBLY\n\
-             [OK] KERNEL STACK\n\
-             [OK] MINI UART\n\
-             [OK] PROPERTY MAILBOX\n\
-             [OK] FRAMEBUFFER",
-                SUCCESS,
-                PANEL,
-                3,
-            );
-
-            framebuffer.draw_string_scaled(
-                110,
-                570,
-                "RASPBERRY PI 4B\n\
-             RESOLUTION: 1920X1080\n\
-             DEPTH: 32 BIT\n\
-             PITCH: 7680 BYTES",
-                TEXT,
-                PANEL,
-                2,
-            );
-
-            println!("[ OK ] Text rendered");
+            println!("========================================");
+            println!("               ANANOS");
+            println!("========================================");
+            println!();
+            println!("[ OK ] BOOT ASSEMBLY");
+            println!("[ OK ] KERNEL STACK");
+            println!("[ OK ] BSS INITIALIZATION");
+            println!("[ OK ] MINI UART");
+            println!("[ OK ] PROPERTY MAILBOX");
+            println!("[ OK ] FRAMEBUFFER");
+            println!("[ OK ] SCREEN CONSOLE");
+            println!();
+            println!("BOARD       : RASPBERRY PI 4B");
+            println!("ARCHITECTURE: AARCH64");
+            println!("RESOLUTION  : 1920X1080");
+            println!("DEPTH       : 32 BIT");
+            println!("PITCH       : 7680 BYTES");
+            println!();
+            println!("WELCOME TO ANANOS!");
         }
 
         Err(error) => {
@@ -156,17 +138,48 @@ fn init_framebuffer() {
     }
 }
 
+fn screen_test() {
+    const WHITE: u32 = 0x00F0_F4F8;
+    const GREEN: u32 = 0x0050_FA7B;
+    const BLUE: u32 = 0x0060_A5FA;
+    const YELLOW: u32 = 0x00FF_D866;
+
+    console::set_screen_foreground(BLUE);
+    println!("ANANOS KERNEL");
+
+    console::set_screen_foreground(GREEN);
+    println!("[ OK ] FRAMEBUFFER");
+    println!("[ OK ] SCREEN CONSOLE");
+
+    console::set_screen_foreground(YELLOW);
+    println!("[INFO] RUNNING ON CPU0");
+
+    console::set_screen_foreground(WHITE);
+    println!("WELCOME TO ANANOS!");
+
+    for index in 0..60 {
+        println!("LOG LINE {:02}: SCREEN SCROLL TEST", index);
+    }
+}
+
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
     println!();
-    println!("================================");
-    println!("         KERNEL PANIC");
-    println!("================================");
-    println!("{info}");
+    println!("==============================");
+    println!("        KERNEL PANIC");
+    println!("==============================");
+
+    if let Some(location) = info.location() {
+        println!("File  : {}", location.file());
+        println!("Line  : {}", location.line());
+        println!("Column: {}", location.column());
+    }
+
+    println!("Message: {}", info.message());
 
     loop {
         unsafe {
-            asm!("wfe");
+            core::arch::asm!("wfe");
         }
     }
 }
