@@ -2,9 +2,13 @@
 #![no_std]
 #![no_main]
 
+mod arch;
 mod console;
 mod drivers;
 mod graphics;
+mod test;
+
+use arch::timer::Timer;
 
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
@@ -56,11 +60,11 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
 
     init_framebuffer();
 
-    screen_test();
+    test::time_test();
+    test::current_exception_level();
 
     println!("DTB address : {dtb_address:#018x}");
     println!();
-    println!("Welcome to AnanOS!");
 
     loop {
         unsafe {
@@ -135,30 +139,6 @@ fn init_framebuffer() {
             println!("[FAIL] Framebuffer initialization");
             println!("Error: {error:?}");
         }
-    }
-}
-
-fn screen_test() {
-    const WHITE: u32 = 0x00F0_F4F8;
-    const GREEN: u32 = 0x0050_FA7B;
-    const BLUE: u32 = 0x0060_A5FA;
-    const YELLOW: u32 = 0x00FF_D866;
-
-    console::set_screen_foreground(BLUE);
-    println!("ANANOS KERNEL");
-
-    console::set_screen_foreground(GREEN);
-    println!("[ OK ] FRAMEBUFFER");
-    println!("[ OK ] SCREEN CONSOLE");
-
-    console::set_screen_foreground(YELLOW);
-    println!("[INFO] RUNNING ON CPU0");
-
-    console::set_screen_foreground(WHITE);
-    println!("WELCOME TO ANANOS!");
-
-    for index in 0..60 {
-        println!("LOG LINE {:02}: SCREEN SCROLL TEST", index);
     }
 }
 
