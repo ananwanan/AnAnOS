@@ -10,46 +10,154 @@
 
 _start:
     /*
-     * x0 中通常保存 Device Tree Blob 地址。
-     * 先保存起来，后面传给 Rust 内核。
+     * x0 = Device Tree Blob 地址。
+     * 保存到 x20，切换异常级不会破坏通用寄存器。
      */
     mov     x20, x0
 
     /*
-     * Raspberry Pi 4 有四个 CPU 核心。
-     * MPIDR_EL1 的低 8 位是当前核心编号。
+     * 暂时只运行 CPU0。
      */
     mrs     x0, mpidr_el1
     and     x0, x0, #0xff
-
-    /*
-     * 暂时只让 CPU0 继续执行。
-     * CPU1～CPU3 进入等待状态。
-     */
     cbnz    x0, .Lsecondary_core
 
     /*
-     * 设置栈顶。
-     *
-     * AArch64 的栈向低地址增长，因此 SP 应指向
-     * __stack_top，而不是 __stack_bottom。
+     * CurrentEL[3:2] 表示当前异常级。
      */
-    adrp    x0, __stack_top
-    add     x0, x0, :lo12:__stack_top
+    mrs     x0, CurrentEL
+    lsr     x0, x0, #2
+
+    cmp     x0, #2
+    b.eq    .Ldrop_from_el2
+
+    cmp     x0, #1
+    b.eq    .Lenter_el1
+
+    b       .Lunsupported_el
+
+
+/*
+ * EL2 -> EL1
+ */
+.Ldrop_from_el2:
+    /*
+     * 设置 EL1 专用栈。
+     */
+    ldr     x0, =__stack_top
+    msr     sp_el1, x0
+
+    /*
+     * 不保留固件的 HCR_EL2 内容。
+     *
+     * RW = 1：EL1 使用 AArch64。
+     * VM = 0：关闭二阶段地址转换。
+     * 其余陷阱位全部清零。
+     */
+    mov     x0, #(1 << 31)
+    msr     hcr_el2, x0
+
+    /*
+     * 清除可能存在的二阶段页表配置。
+     */
+    msr     vttbr_el2, xzr
+
+    /*
+     * 允许 EL1：
+     * - 读取物理计数器 CNTPCT_EL0
+     * - 使用物理定时器
+     */
+    mov     x0, #3
+    msr     cnthctl_el2, x0
+    msr     cntvoff_el2, xzr
+
+    /*
+     * 禁止 EL2 捕获 FP/SIMD 指令。
+     */
+    msr     cptr_el2, xzr
+
+    /*
+     * 允许 EL1 使用 FP/SIMD。
+     *
+     * CPACR_EL1.FPEN = 0b11
+     */
+    mrs     x0, cpacr_el1
+    orr     x0, x0, #(3 << 20)
+    msr     cpacr_el1, x0
+
+    /*
+     * 配置 SCTLR_EL1。
+     *
+     * 不要直接写 0，因为部分位要求保持为 1。
+     * 先保留当前值，再补上 Cortex-A72/ARMv8-A 的 RES1 位。
+     */
+    mrs     x0, sctlr_el1
+
+    /*
+     * 0x30D00800：
+     * 设置常见 ARMv8-A SCTLR_EL1 RES1 位。
+     */
+    mov     x1, #0x0800
+    movk    x1, #0x30d0, lsl #16
+    orr     x0, x0, x1
+
+    /*
+     * 目前关闭：
+     * M  bit 0  MMU
+     * C  bit 2  数据缓存
+     * I  bit 12 指令缓存
+     */
+    bic     x0, x0, #(1 << 0)
+    bic     x0, x0, #(1 << 2)
+    bic     x0, x0, #(1 << 12)
+
+    /*
+     * EE/E0E = 0：EL1 和 EL0 使用小端序。
+     */
+    bic     x0, x0, #(3 << 24)
+
+    msr     sctlr_el1, x0
+
+    /*
+     * eret 后从 .Lenter_el1 继续执行。
+     */
+    adr     x0, .Lenter_el1
+    msr     elr_el2, x0
+
+    /*
+     * SPSR_EL2：
+     *
+     * D/A/I/F = 1：屏蔽 Debug、SError、IRQ、FIQ
+     * M = 0101：进入 EL1h，使用 SP_EL1
+     */
+    mov     x0, #0x3c5
+    msr     spsr_el2, x0
+
+    dsb     sy
+    isb
+    eret
+
+
+/*
+ * 从这里开始必须位于 EL1。
+ */
+.Lenter_el1:
+    /*
+     * EL1h 应当已经选择 SP_EL1。
+     * 再明确设置一次，方便排除栈问题。
+     */
+    msr     spsel, #1
+
+    ldr     x0, =__stack_top
     mov     sp, x0
+
+    isb
 
     /*
      * 清空 .bss。
-     *
-     * Rust/C 语言要求未初始化的静态变量初始值为 0。
-     * kernel8.img 中不会真正保存 .bss 内容，因此需要
-     * 启动代码手动清零。
      */
-    adrp    x0, __bss_start
-    add     x0, x0, :lo12:__bss_start
-
-    adrp    x1, __bss_end
-    add     x1, x1, :lo12:__bss_end
+    ldr     x0, =__bss_start
+    ldr     x1, =__bss_end
 
 .Lclear_bss:
     cmp     x0, x1
@@ -59,33 +167,34 @@ _start:
     b       .Lclear_bss
 
 .Lbss_done:
-    /*
-     * 确保清零操作已经完成。
-     */
     dsb     sy
     isb
 
     /*
-     * 将 Device Tree 地址作为第一个参数传给 Rust。
-     *
-     * AArch64 调用约定中，第一个参数通过 x0 传递。
+     * 第一个参数 x0 = DTB 地址。
      */
     mov     x0, x20
     bl      kernel_main
 
-    /*
-     * kernel_main 返回类型为 !，理论上永远不会返回。
-     */
+
+/*
+ * Rust 内核不应该返回。
+ */
 .Lkernel_returned:
     wfe
     b       .Lkernel_returned
 
+
+/*
+ * CPU1～CPU3 暂停。
+ */
 .Lsecondary_core:
-    /*
-     * 暂时停住其他核心。
-     * 后面实现 SMP 时，会在这里加入多核唤醒流程。
-     */
     wfe
     b       .Lsecondary_core
+
+
+.Lunsupported_el:
+    wfe
+    b       .Lunsupported_el
 
 .size _start, . - _start
