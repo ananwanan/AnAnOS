@@ -270,7 +270,7 @@ if (Test-TcpPort -HostName "127.0.0.1" -Port $GdbPort) {
 可能已有一个 QEMU 实例正在运行。
 请先关闭旧的 QEMU 窗口，或者指定其他端口：
 
-    .\scripts\debug.ps1 -GdbPort 1235
+    .\scripts\debug.ps1 -GdbPort 10120
 "@
 }
 
@@ -354,8 +354,8 @@ set disassemble-next-line on
 
 target remote 127.0.0.1:$GdbPort
 
-hbreak _start
-hbreak kernel_main
+# hbreak _start
+# hbreak kernel_main
 
 echo \n
 echo QEMU + GDB connected.\n
@@ -391,6 +391,7 @@ Write-Host "  Ctrl+C          暂停卡住的内核"
 Write-Host ""
 
 & $Gdb `
+    --quiet `
     -x $GdbCommandFile `
     $KernelElf
 

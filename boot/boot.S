@@ -1,3 +1,13 @@
+/*
+ * SCTLR_EL1 位定义
+ */
+.equ SCTLR_EL1_M,       (1 << 0)
+.equ SCTLR_EL1_C,       (1 << 2)
+.equ SCTLR_EL1_I,       (1 << 12)
+.equ SCTLR_EL1_E0E,     (1 << 24)
+.equ SCTLR_EL1_EE,      (1 << 25)
+.equ SCTLR_EL1_RES1,    0x30D00800
+
 .section .text.boot
 
 .global _start
@@ -94,29 +104,30 @@ _start:
     mrs     x0, sctlr_el1
 
     /*
-     * 0x30D00800：
-     * 设置常见 ARMv8-A SCTLR_EL1 RES1 位。
+     * 0x30D00800:
+     * 设置常见 ARMv8-A SCTLR_EL1 RES1 位(补齐要求为 1 的保留位)
      */
-    mov     x1, #0x0800
-    movk    x1, #0x30d0, lsl #16
+    ldr     x1, =SCTLR_EL1_RES1
     orr     x0, x0, x1
 
     /*
-     * 目前关闭：
+     * 目前关闭(当前阶段关闭 MMU 和缓存):
      * M  bit 0  MMU
      * C  bit 2  数据缓存
      * I  bit 12 指令缓存
      */
-    bic     x0, x0, #(1 << 0)
-    bic     x0, x0, #(1 << 2)
-    bic     x0, x0, #(1 << 12)
+    bic     x0, x0, #SCTLR_EL1_M
+    bic     x0, x0, #SCTLR_EL1_C
+    bic     x0, x0, #SCTLR_EL1_I
 
     /*
-     * EE/E0E = 0：EL1 和 EL0 使用小端序。
+     * EE/E0E = 0: EL1 和 EL0 使用小端序。
      */
-    bic     x0, x0, #(3 << 24)
+    bic     x0, x0, #SCTLR_EL1_E0E
+    bic     x0, x0, #SCTLR_EL1_EE
 
     msr     sctlr_el1, x0
+    isb
 
     /*
      * eret 后从 .Lenter_el1 继续执行。
@@ -142,6 +153,16 @@ _start:
  * 从这里开始必须位于 EL1。
  */
 .Lenter_el1:
+    /**
+     * 检查是否位于 EL1。
+     * 防御检查
+     * 如果不是 EL1，直接进入无限循环。
+     */
+    mrs     x0, CurrentEL
+    lsr     x0, x0, #2
+    cmp     x0, #1
+    b.ne    .Lunsupported_el
+
     /*
      * EL1h 应当已经选择 SP_EL1。
      * 再明确设置一次，方便排除栈问题。
