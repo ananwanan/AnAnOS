@@ -18,6 +18,7 @@ use drivers::mailbox::Mailbox;
 use drivers::uart::MiniUart;
 
 global_asm!(include_str!("../../boot/boot.S"));
+global_asm!(include_str!("../../boot/vectors.S"));
 
 #[macro_export]
 macro_rules! print {
@@ -60,8 +61,17 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
 
     init_framebuffer();
 
-    test::time_test();
-    test::current_exception_level();
+    // 初始化异常向量
+    arch::exception::init();
+
+    {
+        // 测试定时器
+        test::time_test();
+        // 测试当前异常级别
+        test::current_exception_level();
+        // 测试异常向量
+        test::test_exception();
+    }
 
     println!("DTB address : {dtb_address:#018x}");
     println!();

@@ -56,3 +56,12 @@ pub fn current_exception_level() {
     /// Arm 的异常级模型中，操作系统通常运行在 EL1，EL2主要用于虚拟化。
     println!("Current exception level: {}", level);
 }
+
+/// 测试异常向量，触发一个异常，检查是否能正确处理。
+/// # 注意
+/// 这个测试需要在 EL1 下运行，否则会触发 EL0 异常。    
+pub fn test_exception() {
+    unsafe {
+        core::arch::asm!("brk #0");
+    }
+}

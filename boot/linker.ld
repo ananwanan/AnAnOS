@@ -8,6 +8,12 @@ SECTIONS
     .text : ALIGN(16)
     {
         KEEP(*(.text.boot))
+        
+        . = ALIGN(2048);
+        __vectors_start = .;
+        KEEP(*(.text.vectors))
+        __vectors_end = .;
+        
         *(.text*)
     }
 
