@@ -61,7 +61,12 @@ pub fn current_exception_level() {
 /// # 注意
 /// 这个测试需要在 EL1 下运行，否则会触发 EL0 异常。    
 pub fn test_exception() {
+    println!("BEFORE BRK");
+
     unsafe {
-        core::arch::asm!("brk #0");
+        core::arch::asm!("brk #0x1234");
     }
+
+    println!("AFTER BRK");
+    println!("EXCEPTION RETURN SUCCESSFUL");
 }

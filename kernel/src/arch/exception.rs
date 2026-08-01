@@ -28,11 +28,13 @@ pub fn init() {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_sync_exception(context: &mut ExceptionContext) -> ! {
+pub extern "C" fn rust_sync_exception(context: &mut ExceptionContext) {
     let esr = context.esr_el1;
     let exception_class = (esr >> 26) & 0x3f;
-    let iss = esr & 0x01ff_ffff;
-
+    /// BRK 的立即数只需要低 16 位，高 14 位为 0。
+    let iss = esr & 0xffff;
+    let brk_comment = iss & 0xffff;
+    
     let far: u64;
 
     unsafe {
@@ -52,11 +54,34 @@ pub extern "C" fn rust_sync_exception(context: &mut ExceptionContext) -> ! {
     crate::println!("ISS       : {iss:#010x}");
     crate::println!("ELR_EL1   : {:#018x}", context.elr_el1);
     crate::println!("SPSR_EL1  : {:#018x}", context.spsr_el1);
-    crate::println!("FAR_EL1   : {far:#018x}");
 
-    loop {
-        unsafe {
-            asm!("wfe");
+    match exception_class {
+        /*
+         * BRK instruction executed in AArch64.
+         */
+        0x3c => {
+            crate::println!("TYPE      : AARCH64 BRK");
+            crate::println!("COMMENT   : {:#06x}", iss & 0xffff);
+
+            /*
+             * AArch64 指令固定为 4 字节。
+             * 跳过触发异常的 BRK 指令。
+             * BRK 被执行时，ELR_EL1 指向触发异常的那条指令。
+             * 如果不加 4，eret 后会再次执行同一条 BRK，形成无限异常循环。
+             */
+            context.elr_el1 = context.elr_el1.wrapping_add(4);
+
+            crate::println!("ACTION    : SKIP BRK AND CONTINUE");
+        }
+
+        _ => {
+            crate::println!("TYPE      : UNHANDLED");
+
+            loop {
+                unsafe {
+                    core::arch::asm!("wfe");
+                }
+            }
         }
     }
 }
