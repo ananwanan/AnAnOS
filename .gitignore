@@ -3,3 +3,7 @@
 
 # 内核镜像
 kernel8.img
+
+# Python 缓存文件
+__pycache__/
+*.pyc

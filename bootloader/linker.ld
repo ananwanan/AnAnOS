@@ -2,18 +2,12 @@ ENTRY(_start)
 
 SECTIONS
 {
-    . = 0x200000;
-    __kernel_start = .;
+    . = 0x80000;
+    __bootloader_start = .;
 
     .text : ALIGN(16)
     {
         KEEP(*(.text.boot))
-        
-        . = ALIGN(2048);
-        __vectors_start = .;
-        KEEP(*(.text.vectors))
-        __vectors_end = .;
-        
         *(.text*)
     }
 
@@ -30,10 +24,8 @@ SECTIONS
     .bss (NOLOAD) : ALIGN(16)
     {
         __bss_start = .;
-
         *(.bss*)
         *(COMMON)
-
         . = ALIGN(16);
         __bss_end = .;
     }
@@ -41,15 +33,12 @@ SECTIONS
     .stack (NOLOAD) : ALIGN(16)
     {
         __stack_bottom = .;
-
-        /* 64 KiB 内核栈 */
-        . += 64K;
-
+        . += 32K;
         . = ALIGN(16);
         __stack_top = .;
     }
 
-    __kernel_end = .;
+    __bootloader_end = .;
 
     /DISCARD/ :
     {

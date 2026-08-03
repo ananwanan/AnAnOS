@@ -110,10 +110,7 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
     println!("GICD_CTLR     : {:#010x}", gic.distributor_control());
     let distributor_type = gic.distributor_type();
     println!("GICD_TYPER    : {distributor_type:#010x}");
-    println!(
-        "SECURITY EXT  : {}",
-        distributor_type & (1 << 10) != 0,
-    );
+    println!("SECURITY EXT  : {}", distributor_type & (1 << 10) != 0,);
     println!("GICC_CTLR     : {:#010x}", gic.cpu_interface_control());
     println!("GICC_PMR      : {:#010x}", gic.priority_mask());
     println!("GICC_RPR      : {:#010x}", gic.running_priority());
@@ -144,6 +141,7 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
     }
 
     println!("IRQ ENABLE RETURNED");
+    println!("WAITING FOR TIMER INTERRUPT...");
 
     let mut previous_tick = 0;
 

@@ -74,11 +74,7 @@ impl Mailbox {
     /// 因此地址低四位必须全是 0：
     /// address % 16 == 0
     /// 否则地址和 channel 会混在一起
-    pub fn call(
-        &self,
-        channel: u32,
-        buffer: *mut u32,
-    ) -> Result<(), MailboxError> {
+    pub fn call(&self, channel: u32, buffer: *mut u32) -> Result<(), MailboxError> {
         let arm_address = buffer as usize;
 
         if arm_address & 0xF != 0 {
@@ -165,10 +161,7 @@ impl Mailbox {
         }
     }
 
-    pub fn property_call(
-        &self,
-        buffer: *mut u32,
-    ) -> Result<(), MailboxError> {
+    pub fn property_call(&self, buffer: *mut u32) -> Result<(), MailboxError> {
         self.call(PROPERTY_CHANNEL, buffer)
     }
 }
@@ -224,8 +217,7 @@ impl Mailbox {
             return Err(MailboxError::InvalidResponse);
         }
 
-        let response_length =
-            message.request_response_size & 0x7FFF_FFFF;
+        let response_length = message.request_response_size & 0x7FFF_FFFF;
 
         if response_length < 4 {
             return Err(MailboxError::InvalidResponse);

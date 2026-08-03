@@ -7,6 +7,10 @@ name = "arch"
 version = "0.1.0"
 
 [[package]]
+name = "bootloader"
+version = "0.1.0"
+
+[[package]]
 name = "drivers"
 version = "0.1.0"
 

@@ -4,8 +4,8 @@
 # 64 位 AArch64
 arm_64bit=1
 
-# 加载我们自己的裸机内核
-kernel=kernel8.img
+# 加载 UART bootloader，之后通过串口把 kernel8.img 传到 0x200000。
+kernel=bootloader8.img
 
 # 开启串口
 enable_uart=1
