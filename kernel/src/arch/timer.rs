@@ -4,6 +4,8 @@ use core::arch::asm;
 /// 这里使用的是 CPU 自带的通用系统计数器，不依赖 BCM2711 的 MMIO 外设计时器，因此以后移植到其他 ARMv8-A 板子时也更方便
 pub struct Timer;
 
+pub const TIMER_INTERVAL_SECONDS: u64 = 1;
+
 impl Timer {
     pub const fn new() -> Self {
         Self
@@ -125,7 +127,7 @@ impl Timer {
 
         self.delay_micros(remainder_millis * 1_000);
     }
-    
+
     pub fn ticks_to_micros(&self, ticks: u64) -> u64 {
         let frequency = self.frequency();
 
@@ -146,4 +148,70 @@ impl Default for Timer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 安排下一次物理定时器中断。
+pub fn schedule_next_interrupt() {
+    let frequency: u64;
+    let counter: u64;
+
+    unsafe {
+        asm!(
+            "mrs {frequency}, cntfrq_el0",
+            "mrs {counter}, cntpct_el0",
+            frequency = out(reg) frequency,
+            counter = out(reg) counter,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+
+    let deadline = counter.wrapping_add(frequency.saturating_mul(TIMER_INTERVAL_SECONDS));
+
+    unsafe {
+        /**
+         * 使用 CNTP_CVAL_EL0 设置绝对截止时间。
+         * 定时器到期后不会自动安排下一次，所以 IRQ handler 必须重新设置下一次截止时间。
+         */
+        asm!(
+            "msr cntp_cval_el0, {deadline}",
+            "mov {control}, #1",
+            "msr cntp_ctl_el0, {control}",
+            "isb",
+            deadline = in(reg) deadline,
+            control = out(reg) _,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// 禁用物理定时器。
+pub fn disable_interrupt() {
+    unsafe {
+        asm!(
+            "msr cntp_ctl_el0, xzr",
+            "isb",
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// 当前物理定时器是否产生了中断条件。
+pub fn interrupt_pending() -> bool {
+    let control: u64;
+
+    unsafe {
+        asm!(
+            "mrs {control}, cntp_ctl_el0",
+            control = out(reg) control,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+
+    /*
+     * CNTP_CTL_EL0:
+     * bit 0 ENABLE
+     * bit 1 IMASK
+     * bit 2 ISTATUS
+     */
+    control & (1 << 2) != 0
 }

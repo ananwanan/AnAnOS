@@ -14,6 +14,7 @@ use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 
 use drivers::framebuffer::FrameBuffer;
+use drivers::gic::Gic;
 use drivers::mailbox::Mailbox;
 use drivers::uart::MiniUart;
 
@@ -70,11 +71,62 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
         // 测试当前异常级别
         test::current_exception_level();
         // 测试异常向量
-        test::test_exception();
+        // test::test_exception();
     }
 
     println!("DTB address : {dtb_address:#018x}");
     println!();
+
+    println!();
+    println!("INITIALIZING INTERRUPTS...");
+
+    arch::exception::disable_irq();
+    println!("[ OK ] IRQ MASKED");
+
+    let gic = Gic::new();
+    gic.init();
+    println!("[ OK ] GIC-400 INITIALIZED");
+
+    arch::timer::schedule_next_interrupt();
+    println!("[ OK ] GENERIC TIMER ARMED");
+
+    println!(
+        "IRQ MASKED BEFORE ENABLE: {}",
+        arch::exception::irq_is_masked(),
+    );
+
+    arch::exception::enable_irq();
+
+    println!(
+        "IRQ MASKED AFTER ENABLE : {}",
+        arch::exception::irq_is_masked(),
+    );
+
+    println!("[ OK ] IRQ ENABLED");
+    println!("WAITING FOR TIMER INTERRUPTS...");
+
+    arch::timer::schedule_next_interrupt();
+
+    println!("[ OK ] GENERIC TIMER ARMED");
+
+    Timer::new().delay_millis(1_500);
+
+    println!(
+        "TIMER PENDING BEFORE IRQ ENABLE: {}",
+        arch::timer::interrupt_pending()
+    );
+    
+    loop {
+        unsafe {
+            /*
+             * Wait For Interrupt。
+             *
+             * 有 IRQ 到达时 CPU 会离开低功耗等待状态，
+             * 进入异常向量表。
+             */
+            core::arch::asm!("wfi", options(nomem, nostack, preserves_flags),);
+        }
+    }
 
     loop {
         unsafe {

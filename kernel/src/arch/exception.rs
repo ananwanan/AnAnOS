@@ -1,4 +1,9 @@
+use crate::arch::timer;
+use crate::drivers::gic::{GENERIC_PHYSICAL_TIMER_IRQ, Gic, SPURIOUS_IRQ};
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C)]
 pub struct ExceptionContext {
@@ -34,7 +39,7 @@ pub extern "C" fn rust_sync_exception(context: &mut ExceptionContext) {
     /// BRK 的立即数只需要低 16 位，高 14 位为 0。
     let iss = esr & 0xffff;
     let brk_comment = iss & 0xffff;
-    
+
     let far: u64;
 
     unsafe {
@@ -88,5 +93,96 @@ pub extern "C" fn rust_sync_exception(context: &mut ExceptionContext) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_irq_exception(_context: &mut ExceptionContext) {
-    crate::println!("[IRQ] UNHANDLED");
+    let gic = Gic::new();
+
+    /*
+     * IAR 的低 10 位是中断 ID。
+     * 其余位包含 CPU 来源等信息，EOIR 时要完整写回。
+     */
+    let acknowledge_value = gic.acknowledge();
+    let interrupt_id = acknowledge_value & 0x3ff;
+
+    match interrupt_id {
+        GENERIC_PHYSICAL_TIMER_IRQ => {
+            /*
+             * 先安排下一次中断。
+             * 写入新的 CVAL 后，当前定时器条件便被解除。
+             */
+            timer::schedule_next_interrupt();
+
+            let tick = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+
+            /*
+             * 当前测试阶段每秒仅产生一次 IRQ，且主循环不打印，
+             * 所以暂时可以直接输出。
+             *
+             * 后面提高 tick 频率后，IRQ 中不要直接 println!。
+             */
+            crate::println!("[IRQ] GENERIC TIMER TICK: {}", tick,);
+        }
+
+        SPURIOUS_IRQ => {
+            /*
+             * 1023 表示没有可处理的中断。
+             * 对 spurious interrupt 不写 EOIR。
+             */
+            return;
+        }
+
+        _ => {
+            crate::println!("[IRQ] UNHANDLED INTERRUPT: {}", interrupt_id,);
+        }
+    }
+
+    gic.end_interrupt(acknowledge_value);
+}
+
+pub fn timer_ticks() -> u64 {
+    TIMER_TICKS.load(Ordering::Relaxed)
+}
+
+/// 解除 PSTATE 中的 IRQ 屏蔽位。
+pub fn enable_irq() {
+    unsafe {
+        /**
+         * daifclr #2 中的立即数是四位掩码：
+         * bit 0: D
+         * bit 1: A
+         * bit 2: I
+         * bit 3: F
+         */
+        core::arch::asm!(
+            "msr daifclr, #2",
+            "isb",
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// 设置 PSTATE 中的 IRQ 屏蔽位。
+pub fn disable_irq() {
+    unsafe {
+        core::arch::asm!(
+            "msr daifset, #2",
+            "isb",
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+pub fn irq_is_masked() -> bool {
+    let daif: u64;
+
+    unsafe {
+        core::arch::asm!(
+            "mrs {daif}, daif",
+            daif = out(reg) daif,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+
+    /*
+     * DAIF.I 是 bit 7。
+     */
+    daif & (1 << 7) != 0
 }
