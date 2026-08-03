@@ -95,46 +95,30 @@ pub extern "C" fn rust_sync_exception(context: &mut ExceptionContext) {
 pub extern "C" fn rust_irq_exception(_context: &mut ExceptionContext) {
     let gic = Gic::new();
 
-    /*
-     * IAR 的低 10 位是中断 ID。
-     * 其余位包含 CPU 来源等信息，EOIR 时要完整写回。
-     */
-    let acknowledge_value = gic.acknowledge();
-    let interrupt_id = acknowledge_value & 0x3ff;
+    let acknowledge = gic.acknowledge();
+    let interrupt_id = acknowledge & 0x3ff;
 
     match interrupt_id {
         GENERIC_PHYSICAL_TIMER_IRQ => {
-            /*
-             * 先安排下一次中断。
-             * 写入新的 CVAL 后，当前定时器条件便被解除。
-             */
+            // 先设置下一次截止时间，解除当前电平中断条件。
             timer::schedule_next_interrupt();
 
-            let tick = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-
             /*
-             * 当前测试阶段每秒仅产生一次 IRQ，且主循环不打印，
-             * 所以暂时可以直接输出。
-             *
-             * 后面提高 tick 频率后，IRQ 中不要直接 println!。
+             * MMU 关闭时，真机不保证 fetch_add 使用的 LDXR/STXR 能在
+             * 当前内存属性下成功。这里只有 CPU0 的 IRQ handler 写入。
              */
-            crate::println!("[IRQ] GENERIC TIMER TICK: {}", tick,);
+            let ticks = TIMER_TICKS.load(Ordering::Relaxed);
+            TIMER_TICKS.store(ticks.wrapping_add(1), Ordering::Relaxed);
         }
 
-        SPURIOUS_IRQ => {
-            /*
-             * 1023 表示没有可处理的中断。
-             * 对 spurious interrupt 不写 EOIR。
-             */
-            return;
-        }
+        SPURIOUS_IRQ => return,
 
         _ => {
-            crate::println!("[IRQ] UNHANDLED INTERRUPT: {}", interrupt_id,);
+            // 目前只统计，暂时不要在 IRQ 内打印。
         }
     }
 
-    gic.end_interrupt(acknowledge_value);
+    gic.end_interrupt(acknowledge);
 }
 
 pub fn timer_ticks() -> u64 {

@@ -10,6 +10,9 @@ kernel=kernel8.img
 # 开启串口
 enable_uart=1
 
+# Raspberry Pi 4 裸机使用 GIC-400 接收中断
+enable_gic=1
+
 # Mini UART 的波特率依赖 VPU core clock
 # 固定为 250 MHz，和代码里的 AUX_MU_BAUD_REG = 270 对应
 core_freq=250

@@ -7,7 +7,7 @@ use core::ptr::{read_volatile, write_volatile};
  * CPU Interface: 0xFF84_2000
  *
  * 当前 MMU 尚未开启，直接使用物理地址。
- * 
+ *
  * BCM2711 的 GIC Distributor 和 CPU Interface 窗口分别位于 0xFF841000 和 0xFF842000。
  * Pi 4 上的 GIC 是 GICv2，而不是 GICv3。
  */
@@ -16,7 +16,7 @@ const GICC_BASE: usize = 0xFF84_2000;
 
 // Distributor 寄存器
 const GICD_CTLR: *mut u32 = (GICD_BASE + 0x000) as *mut u32;
-const GICD_IGROUPR0: *mut u32 = (GICD_BASE + 0x080) as *mut u32;
+const GICD_TYPER: *const u32 = (GICD_BASE + 0x004) as *const u32;
 const GICD_ISENABLER0: *mut u32 = (GICD_BASE + 0x100) as *mut u32;
 const GICD_ICENABLER0: *mut u32 = (GICD_BASE + 0x180) as *mut u32;
 const GICD_ICPENDR0: *mut u32 = (GICD_BASE + 0x280) as *mut u32;
@@ -29,8 +29,16 @@ const GICC_BPR: *mut u32 = (GICC_BASE + 0x008) as *mut u32;
 const GICC_IAR: *const u32 = (GICC_BASE + 0x00C) as *const u32;
 const GICC_EOIR: *mut u32 = (GICC_BASE + 0x010) as *mut u32;
 
+const GICD_ISPENDR0: *const u32 = (GICD_BASE + 0x200) as *const u32;
+const GICD_ISENABLER0_READ: *const u32 = (GICD_BASE + 0x100) as *const u32;
+const GICD_IGROUPR0_READ: *const u32 = (GICD_BASE + 0x080) as *const u32;
+const GICC_HPPIR: *const u32 = (GICC_BASE + 0x018) as *const u32;
+const GICC_RPR: *const u32 = (GICC_BASE + 0x014) as *const u32;
+
 pub const GENERIC_PHYSICAL_TIMER_IRQ: u32 = 30;
 pub const SPURIOUS_IRQ: u32 = 1023;
+
+const GICC_AHPPIR: *const u32 = (GICC_BASE + 0x028) as *const u32;
 
 pub struct Gic;
 
@@ -41,64 +49,49 @@ impl Gic {
 
     pub fn init(&self) {
         unsafe {
-            /*
-             * 先关闭 CPU Interface 和 Distributor。
-             */
+            // 当前 CPU Interface 先关闭。
             write_volatile(GICC_CTLR, 0);
-            write_volatile(GICD_CTLR, 0);
 
             /*
-             * 先禁用并清除 SGI/PPI。
+             * 不建议在这里只为初始化一个 PPI 就关闭整个 Distributor。
+             * Distributor 是整个 GIC 共享的，而 PPI 配置是当前 CPU 私有的。
              *
-             * GICD_ISENABLER0 等寄存器对于 PPI 是每 CPU banked，
-             * 因此这里配置的是当前 CPU0。
+             * 树莓派固件可能已经对 Distributor 做过基础设置。
              */
-            write_volatile(GICD_ICENABLER0, 0xFFFF_FFFF);
-            write_volatile(GICD_ICPENDR0, 0xFFFF_FFFF);
+
+            // 禁用当前 CPU 的 PPI 30。
+            write_volatile(GICD_ICENABLER0, 1u32 << GENERIC_PHYSICAL_TIMER_IRQ);
+
+            // 清除可能遗留的 pending 状态。
+            write_volatile(GICD_ICPENDR0, 1u32 << GENERIC_PHYSICAL_TIMER_IRQ);
 
             /*
-             * 将物理定时器 PPI 30 配置为 Group 1，
-             * 供当前 Non-secure EL1 内核处理。
-             */
-            let mut group = read_volatile(GICD_IGROUPR0);
-            group |= 1 << GENERIC_PHYSICAL_TIMER_IRQ;
-            write_volatile(GICD_IGROUPR0, group);
-
-            /*
-             * 设置 IRQ 30 的优先级。
-             *
-             * 每个中断占一个字节。
-             * 数字越小，优先级越高。
+             * IRQ 30 的优先级字节。
              */
             write_volatile(
                 (GICD_IPRIORITYR + GENERIC_PHYSICAL_TIMER_IRQ as usize) as *mut u8,
                 0x80,
             );
 
-            /*
-             * CPU 接受所有优先级不低于 0xFF 的中断。
-             */
-            write_volatile(GICC_PMR, 0xFF);
-
-            /*
-             * 暂时不使用复杂的优先级分组。
-             */
+            write_volatile(GICC_PMR, 0xff);
             write_volatile(GICC_BPR, 0);
 
-            /*
-             * 启用物理定时器 PPI。
-             */
-            write_volatile(GICD_ISENABLER0, 1 << GENERIC_PHYSICAL_TIMER_IRQ);
+            // 启用当前 CPU 的 PPI 30。
+            write_volatile(GICD_ISENABLER0, 1u32 << GENERIC_PHYSICAL_TIMER_IRQ);
 
             /*
-             * 启用 Distributor 和 CPU Interface。
-             *
-             * 对 Non-secure GICv2 访问而言，bit 0 控制 Group 1。
+             * 确保 Distributor 已启用。
+             * 保留已有位，不要直接覆盖成 1。
              */
-            write_volatile(GICD_CTLR, 1);
+            let distributor_control = read_volatile(GICD_CTLR);
+            write_volatile(GICD_CTLR, distributor_control | 1);
+
+            /*
+             * 启用当前 CPU Interface。
+             */
             write_volatile(GICC_CTLR, 1);
 
-            core::arch::asm!("dsb sy", "isb");
+            core::arch::asm!("dsb sy", "isb", options(nostack, preserves_flags),);
         }
     }
 
@@ -113,8 +106,47 @@ impl Gic {
     pub fn end_interrupt(&self, acknowledge_value: u32) {
         unsafe {
             write_volatile(GICC_EOIR, acknowledge_value);
-            core::arch::asm!("dsb sy", "isb");
+            core::arch::asm!("dsb sy", "isb", options(nostack, preserves_flags),);
         }
+    }
+    pub fn distributor_control(&self) -> u32 {
+        unsafe { read_volatile(GICD_CTLR) }
+    }
+
+    pub fn distributor_type(&self) -> u32 {
+        unsafe { read_volatile(GICD_TYPER) }
+    }
+
+    pub fn cpu_interface_control(&self) -> u32 {
+        unsafe { read_volatile(GICC_CTLR) }
+    }
+
+    pub fn priority_mask(&self) -> u32 {
+        unsafe { read_volatile(GICC_PMR) }
+    }
+
+    pub fn enabled_private_interrupts(&self) -> u32 {
+        unsafe { read_volatile(GICD_ISENABLER0_READ) }
+    }
+
+    pub fn pending_private_interrupts(&self) -> u32 {
+        unsafe { read_volatile(GICD_ISPENDR0) }
+    }
+
+    pub fn private_interrupt_groups(&self) -> u32 {
+        unsafe { read_volatile(GICD_IGROUPR0_READ) }
+    }
+
+    pub fn highest_pending_interrupt(&self) -> u32 {
+        unsafe { read_volatile(GICC_HPPIR) & 0x3ff }
+    }
+
+    pub fn running_priority(&self) -> u32 {
+        unsafe { read_volatile(GICC_RPR) }
+    }
+
+    pub fn group1_highest_pending_interrupt(&self) -> u32 {
+        unsafe { read_volatile(GICC_AHPPIR) & 0x3ff }
     }
 }
 

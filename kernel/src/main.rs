@@ -67,7 +67,7 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
 
     {
         // 测试定时器
-        test::time_test();
+        // test::time_test();
         // 测试当前异常级别
         test::current_exception_level();
         // 测试异常向量
@@ -80,50 +80,82 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
     println!();
     println!("INITIALIZING INTERRUPTS...");
 
+    /*
+     * 诊断期间始终屏蔽 CPU IRQ。
+     */
     arch::exception::disable_irq();
-    println!("[ OK ] IRQ MASKED");
 
     let gic = Gic::new();
     gic.init();
-    println!("[ OK ] GIC-400 INITIALIZED");
+
+    println!("[ OK ] GIC INITIALIZED");
 
     arch::timer::schedule_next_interrupt();
-    println!("[ OK ] GENERIC TIMER ARMED");
+    println!("[ OK ] TIMER ARMED");
 
+    /*
+     * 定时器设定为一秒，等待 1.5 秒让它确定到期。
+     * IRQ 仍然屏蔽，所以不会进入 handler。
+     */
+    Timer::new().delay_millis(1_500);
+
+    let enabled = gic.enabled_private_interrupts();
+    let pending = gic.pending_private_interrupts();
+    let groups = gic.private_interrupt_groups();
+
+    println!();
+    println!("TIMER CONTROL : {:#010x}", arch::timer::control());
+    println!("TIMER PENDING : {}", arch::timer::interrupt_pending());
+
+    println!("GICD_CTLR     : {:#010x}", gic.distributor_control());
+    let distributor_type = gic.distributor_type();
+    println!("GICD_TYPER    : {distributor_type:#010x}");
     println!(
-        "IRQ MASKED BEFORE ENABLE: {}",
-        arch::exception::irq_is_masked(),
+        "SECURITY EXT  : {}",
+        distributor_type & (1 << 10) != 0,
     );
+    println!("GICC_CTLR     : {:#010x}", gic.cpu_interface_control());
+    println!("GICC_PMR      : {:#010x}", gic.priority_mask());
+    println!("GICC_RPR      : {:#010x}", gic.running_priority());
+
+    println!("ISENABLER0    : {enabled:#010x}");
+    println!("ISPENDR0      : {pending:#010x}");
+    println!("IGROUPR0 (NS) : {groups:#010x}");
+    println!("HPPIR         : {}", gic.highest_pending_interrupt());
+    println!("AHPPIR        : {}", gic.group1_highest_pending_interrupt());
+
+    println!("IRQ30 ENABLED : {}", enabled & (1u32 << 30) != 0);
+    println!("IRQ30 PENDING : {}", pending & (1u32 << 30) != 0);
+    println!();
+    println!("ENABLING CPU IRQ...");
 
     arch::exception::enable_irq();
 
-    println!(
-        "IRQ MASKED AFTER ENABLE : {}",
-        arch::exception::irq_is_masked(),
-    );
+    /*
+     * 防止下一条 Rust 代码掩盖问题。
+     */
+    unsafe {
+        core::arch::asm!(
+            "nop",
+            "nop",
+            "nop",
+            options(nomem, nostack, preserves_flags),
+        );
+    }
 
-    println!("[ OK ] IRQ ENABLED");
-    println!("WAITING FOR TIMER INTERRUPTS...");
+    println!("IRQ ENABLE RETURNED");
 
-    arch::timer::schedule_next_interrupt();
+    let mut previous_tick = 0;
 
-    println!("[ OK ] GENERIC TIMER ARMED");
-
-    Timer::new().delay_millis(1_500);
-
-    println!(
-        "TIMER PENDING BEFORE IRQ ENABLE: {}",
-        arch::timer::interrupt_pending()
-    );
-    
     loop {
+        let tick = arch::exception::timer_ticks();
+
+        if tick != previous_tick {
+            println!("TIMER TICK: {}", tick);
+            previous_tick = tick;
+        }
+
         unsafe {
-            /*
-             * Wait For Interrupt。
-             *
-             * 有 IRQ 到达时 CPU 会离开低功耗等待状态，
-             * 进入异常向量表。
-             */
             core::arch::asm!("wfi", options(nomem, nostack, preserves_flags),);
         }
     }

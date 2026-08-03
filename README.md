@@ -44,3 +44,15 @@ kernel_main()
 Rust
 
 ```
+
+
+```
+arch/timer.rs
+    直接操作 Generic Timer 寄存器
+
+arch/exception.rs
+    IRQ 入口和分发
+
+time/mod.rs
+    ticks、uptime、sleep 等内核时间服务 
+```

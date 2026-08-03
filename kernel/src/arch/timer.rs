@@ -215,3 +215,46 @@ pub fn interrupt_pending() -> bool {
      */
     control & (1 << 2) != 0
 }
+
+pub fn control() -> u64 {
+    let value: u64;
+
+    unsafe {
+        asm!(
+            "mrs {value}, cntp_ctl_el0",
+            value = out(reg) value,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+
+    value
+}
+
+pub fn compare_value() -> u64 {
+    let value: u64;
+
+    unsafe {
+        asm!(
+            "mrs {value}, cntp_cval_el0",
+            value = out(reg) value,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+
+    value
+}
+
+pub fn current_counter() -> u64 {
+    let value: u64;
+
+    unsafe {
+        asm!(
+            "isb",
+            "mrs {value}, cntpct_el0",
+            value = out(reg) value,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+
+    value
+}
