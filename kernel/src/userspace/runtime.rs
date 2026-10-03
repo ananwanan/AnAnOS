@@ -616,7 +616,7 @@ fn syscall_write(state: &mut State, address: u64, length: usize) -> Result<u64, 
 }
 
 impl syscall::Services for State {
-    fn write(&mut self, address: u64, length: usize) -> Result<u64, Errno> {
+    fn write(&mut self, _fd: u64, address: u64, length: usize) -> Result<u64, Errno> {
         syscall_write(self, address, length)
     }
 
@@ -629,6 +629,10 @@ impl syscall::Services for State {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_user_sync_exception(frame: &mut UserExceptionFrame) -> u64 {
+    #[cfg(feature = "filesystem")]
+    if let Some(action) = super::system::handle_sync(frame) {
+        return action;
+    }
     TASK.with(|state| {
         if !state.running || !abi::frame_from_el0(frame.context.spsr_el1) {
             panic!("unexpected lower-EL exception origin");
@@ -674,6 +678,10 @@ pub extern "C" fn rust_user_irq_exception(frame: &mut UserExceptionFrame) -> u64
     let previous_tick = exception::timer_ticks();
     exception::rust_irq_exception(&mut frame.context);
     let timer_events = exception::timer_ticks().wrapping_sub(previous_tick);
+    #[cfg(feature = "filesystem")]
+    if let Some(action) = super::system::handle_irq(frame, timer_events) {
+        return action;
+    }
     TASK.with(|state| {
         if !state.running || !abi::frame_from_el0(frame.context.spsr_el1) {
             panic!("unexpected lower-EL IRQ origin");

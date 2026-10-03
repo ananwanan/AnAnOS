@@ -4,7 +4,7 @@
 C/C++/Rust 工具链。按 AGENTS.md 的依赖顺序推进；代码完成、主机测试通过和
 实机验收分别记录，不能互相替代。
 
-## 当前里程碑：M1 物理内存与启动安全
+## M1 物理内存与启动安全
 
 实现范围：
 
@@ -55,4 +55,12 @@ M3 的 Gate A 基础代码也已实现：独立 TTBR0/用户页、EL0t、SVC wri
 完整上下文返回、用户故障/栈保护页、EL0 timer 超时和资源回收。
 `-EnableUserspace` 构建单独镜像并隐式启用 MMU，详见 [userspace.md](userspace.md)
 和 [临时 ABI](abi/README.md)。实机 Gate A 验收仍待 UART 证据；
-调度器、ELF/VFS、活跃页表修改和缓存开启不属于这次实现。
+M3 单独镜像保留这些诊断；活跃页表修改和缓存开启仍未实现。
+
+M4 `syscall -> 文件系统` 基础代码已实现：静态 ELF64 独立程序、Unix 入口栈、
+四进程轮转、timer IRQ 保存上下文、spawn/exec/wait、进程 FD/cwd、只读 USTAR
+initramfs、可写 RAM 文件/目录和常用文件 syscall。`-EnableFilesystem` 隐式
+启用 MMU/EL0，构建 `kernel8-fs.img`，先跑前序诊断再跑 ELF 文件往返/exec/wait
+和资源回收验收。主机及模拟证据见 [M4 记录](validation/M4.md)，实现边界见
+[filesystem.md](filesystem.md)。M1-M4 实机验收均须真实 UART/HDMI 证据；
+持久存储、pipes、libc/sysroot 和 hosted toolchain 继续按后续依赖推进。

@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 function Test-AnanImage {
-    param([string]$Elf, [string]$Image, [string]$Entry, [switch]$Kernel, [switch]$Userspace)
+    param([string]$Elf, [string]$Image, [string]$Entry, [switch]$Kernel, [switch]$Userspace, [switch]$Filesystem)
     $taskElfPath = "target/aarch64-unknown-none/debug/$Elf"
     $taskHeader = (rust-readobj --file-headers $taskElfPath) -join "`n"
     if ($LASTEXITCODE -ne 0 -or $taskHeader -notmatch 'Machine: EM_AARCH64' -or
@@ -43,6 +43,9 @@ function Test-AnanImage {
         }
     }
     $taskUserEntry = $taskNm | Select-String '\sarch_enter_user$'
+    $taskResume = $taskNm | Select-String '\sarch_resume_user$'
+    if ($Filesystem -and -not $taskResume) { throw "Missing process context resume runner." }
+    if (-not $Filesystem -and $taskResume) { throw "Process runner must only appear in filesystem image." }
     if ($Userspace) {
         if (-not $taskUserEntry) { throw "Missing EL0 runner in $Image." }
         foreach ($taskHandler in @("rust_user_sync_exception", "rust_user_irq_exception", "arch_user_return")) {
@@ -97,12 +100,20 @@ Push-Location (Split-Path -Parent $PSScriptRoot)
 try {
     cargo fmt --all -- --check
     if ($LASTEXITCODE -ne 0) { throw "Formatting check failed." }
+    cargo check --workspace
+    if ($LASTEXITCODE -ne 0) { throw "Workspace default check failed." }
     cargo check --workspace --all-features
     if ($LASTEXITCODE -ne 0) { throw "Workspace feature check failed." }
     $taskHost = ((rustc -vV | Select-String '^host: ').ToString() -replace '^host: ', '').Trim()
     if ($LASTEXITCODE -ne 0 -or -not $taskHost) { throw "Cannot determine Rust host target." }
     cargo test -p kernel --lib --target $taskHost
     if ($LASTEXITCODE -ne 0) { throw "Host memory/userspace tests failed." }
+    & "$PSScriptRoot\build_userspace_windows.ps1" -VerifyFixtures
+    if ((Get-Command clang -ErrorAction SilentlyContinue) -and (Get-Command ld.lld -ErrorAction SilentlyContinue)) {
+        & "$PSScriptRoot\build_userspace_windows.ps1"
+    } else {
+        Write-Host "LLVM not available: manifest verified; ELF source rebuild not performed."
+    }
 
     # Check the matching ELF before the next build overwrites the common path.
     & "$PSScriptRoot\build_windows.ps1"
@@ -111,6 +122,8 @@ try {
     Test-AnanImage -Elf kernel -Image kernel8-mmu.img -Entry 0x200000 -Kernel
     & "$PSScriptRoot\build_windows.ps1" -EnableUserspace
     Test-AnanImage -Elf kernel -Image kernel8-el0.img -Entry 0x200000 -Kernel -Userspace
+    & "$PSScriptRoot\build_windows.ps1" -EnableFilesystem
+    Test-AnanImage -Elf kernel -Image kernel8-fs.img -Entry 0x200000 -Kernel -Userspace -Filesystem
     & "$PSScriptRoot\build_bootloader_windows.ps1"
     Test-AnanImage -Elf bootloader -Image bootloader8.img -Entry 0x80000
     git diff --check

@@ -107,6 +107,20 @@ impl MiniUart {
         }
     }
 
+    /// Poll without blocking CPU0 or masking timer IRQs while waiting for input.
+    #[cfg(feature = "filesystem")]
+    pub fn try_read_byte(&self) -> Option<u8> {
+        // SAFETY: Mini UART is initialized; reading IO consumes one byte only
+        // when LSR data-ready is set. Registers retain their 32-bit MMIO width.
+        unsafe {
+            if read_volatile(AUX_MU_LSR_REG) & 1 == 0 {
+                None
+            } else {
+                Some(read_volatile(AUX_MU_IO_REG) as u8)
+            }
+        }
+    }
+
     /// 写入字符串
     /// 等待发送缓冲区为空，将字符串写入发送缓冲区。
     /// 如果字符串包含换行符，会自动添加回车符。

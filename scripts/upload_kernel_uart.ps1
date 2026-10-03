@@ -3,14 +3,15 @@ param(
     [int]$Baud = 115200,
     [switch]$Monitor,
     [switch]$EnableMmu,
-    [switch]$EnableUserspace
+    [switch]$EnableUserspace,
+    [switch]$EnableFilesystem
 )
 
 $ErrorActionPreference = "Stop"
 
-& "$PSScriptRoot\build_windows.ps1" -EnableMmu:$EnableMmu -EnableUserspace:$EnableUserspace
+& "$PSScriptRoot\build_windows.ps1" -EnableMmu:$EnableMmu -EnableUserspace:$EnableUserspace -EnableFilesystem:$EnableFilesystem
 
-$taskKernelImage = if ($EnableUserspace) { "kernel8-el0.img" } elseif ($EnableMmu) { "kernel8-mmu.img" } else { "kernel8.img" }
+$taskKernelImage = if ($EnableFilesystem) { "kernel8-fs.img" } elseif ($EnableUserspace) { "kernel8-el0.img" } elseif ($EnableMmu) { "kernel8-mmu.img" } else { "kernel8.img" }
 
 $arguments = @(
     "$PSScriptRoot\upload_uart.py",

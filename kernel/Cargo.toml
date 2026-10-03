@@ -9,5 +9,7 @@ default = []
 mmu = []
 # EL0 bring-up depends on translation and explicit permission isolation.
 userspace = ["mmu"]
+# Static ELF processes and the syscall/VFS/RAM filesystem milestone.
+filesystem = ["userspace"]
 
 [dependencies]

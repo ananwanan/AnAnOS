@@ -1,7 +1,8 @@
-# Provisional M3 AArch64 userspace ABI
+# Provisional M3/M4 AArch64 userspace ABI
 
-This is the embedded-program bring-up ABI, not a published libc ABI, Linux ABI
-or permanent AnanOS target triple. ELF, argc/argv/envp, TLS, signals and dynamic
+This is a bring-up ABI, not a published libc ABI, Linux ABI or permanent AnanOS
+target triple. M3 retains its embedded-program entry; the optional `filesystem`
+feature adds the M4 ELF/process/file contract below. TLS, signals and dynamic
 linking remain later work. Kernel-private Rust structures are never exposed.
 
 ## Entry and virtual layout
@@ -101,3 +102,100 @@ The kernel restores its TTBR0 and completes full TLBI before freeing any task
 page or table. All pages are initially zeroed and are reclaimed after exit,
 fault or timeout; active descriptors are never edited with the offline mapper.
 See [M3 execution and validation](../userspace.md).
+
+## M4 static ELF entry
+
+M4 maps the same private user window and four-page guarded stack. Instead of
+the M3 copied code/data addresses, sorted non-overlapping ELF PT_LOAD ranges
+determine user text/rodata/data addresses. Each owns separate physical pages;
+W^X, EL0 AP and PXN/UXN rules remain identical. Initial GPR/SIMD/FP state is zero.
+SP is 16-byte aligned and points at this little-endian u64 word sequence:
+
+```text
+argc
+argv[0] ... argv[argc-1], NULL
+envp[0] ... envp[envc-1], NULL
+AT_PAGESZ (6), 4096
+AT_ENTRY (9), ELF entry
+AT_NULL (0), 0
+```
+
+argv/envp values are user pointers to NUL-terminated strings stored higher in
+the same stack. Strings and arrays never point into kernel memory. There is no
+loader pointer in x0, no TLS and no random/capability auxv yet. See the
+[System V ELF program-header specification](https://refspecs.linuxfoundation.org/elf/gabi4%2B/ch5.pheader.html)
+for PT_LOAD, zero-fill, alignment and segment permissions. M4 additionally
+rejects overlapping rounded pages, dynamic/interpreter/TLS segments, writable
+code, non-readable segments and entries outside initialized executable bytes.
+
+## M4 syscall extension (`filesystem` feature)
+
+The register/SVC/error contract above is unchanged. `write` now accepts any
+open writable descriptor in the current process; zero-byte calls still check
+descriptor/access before skipping the pointer. Filesystem and process calls
+return ENOSYS in the standalone M3 image. Paths are `(pointer, byte length)`
+without a NUL terminator; embedded NUL is invalid. Maximum path length is 256,
+component length 48; read/write/getdents buffers are bounded to 4096 bytes.
+
+| Number | Call | x0..x5 arguments | Result |
+| ---: | --- | --- | --- |
+| 4 | read | fd, destination, length | Read count; regular-file EOF=0 |
+| 5 | open | path, length, flags | Lowest free FD |
+| 6 | close | fd | 0 |
+| 7 | lseek | fd, signed i64 offset, whence (0 SET/1 CUR/2 END) | New offset |
+| 8 | fstat | fd, destination | 0, writes 32-byte stat |
+| 9 | getdents | directory FD, destination, capacity | 80 or EOF=0 |
+| 10 | mkdir | path, length | 0 |
+| 11 | unlink | path, length | 0; empty unreferenced directories supported |
+| 12 | rename | old path, old length, new path, new length | 0 |
+| 13 | chdir | path, length | 0 |
+| 14 | getcwd | destination, capacity | Bytes including trailing NUL |
+| 15 | dup | fd | Lowest free FD, shared open description |
+| 16 | dup2 | fd, target FD | Target FD, atomically replaces its old reference |
+| 17 | getpid | None | Current nonzero PID |
+| 18 | spawn | path, length, argv pairs, argc, envp pairs, envc | Child PID |
+| 19 | exec | path, length, argv pairs, argc, envp pairs, envc | Success does not return; error preserves old process |
+| 20 | waitpid | PID or -1 (any), status pointer or 0, options | Child PID or WNOHANG=0 |
+| 21 | clock_gettime | clock ID (1 MONOTONIC), destination | 0, writes timespec |
+
+Public open flags: access `O_RDONLY=0`, `O_WRONLY=1`, `O_RDWR=2`, plus
+`O_CREAT=0x40`, `O_EXCL=0x80`, `O_TRUNC=0x200`, `O_APPEND=0x400`,
+`O_DIRECTORY=0x10000`. Unknown bits/access3, EXCL without CREAT and readonly
+TRUNC/APPEND fail EINVAL. These bits are explicitly translated to private VFS
+flags. Terminal read polls UART and returns EAGAIN if no input; lseek on a
+terminal returns ESPIPE. Directory seeks use enumeration cookies, not bytes;
+seek(0,SET) rewinds. getdents emits one fixed 80-byte record per call and requires
+capacity>=80, validating the complete requested capacity before consuming a
+cookie. Entries include `.` and `..`.
+
+ABI outputs have fixed-width little-endian fields; they never expose Rust layout:
+
+| Object | Byte offsets |
+| --- | --- |
+| stat (32 bytes) | inode u64@0, size u64@8, kind u32@16, mode u32@20, nlink u64@24 |
+| dirent (80 bytes) | inode u64@0, kind u32@8, name length u32@12, zero-padded name bytes[64]@16 |
+| timespec (16 bytes) | seconds i64@0, nanoseconds i64@8 (0..999999999) |
+| wait status (4 bytes) | signed i32, `(exit & 255)<<8`; fault=11, diagnostic timeout=9 |
+| spawn/exec string pair | address u64@0, byte length u64@8 |
+
+Kinds: regular=1, directory=2, character terminal=3. Mode combines POSIX file
+type bits with bootstrap read/write permissions; credentials enforcement has
+not been implemented. An unlinked open file reports nlink=0. argv/envp pair
+arrays each have at most eight entries; strings each have at most 255 bytes and
+no embedded NUL. The kernel copies all strings before ELF construction, then
+builds the normal NUL-terminated initial stack. Zero arrays ignore their pointer.
+No argument/environment inheritance is implicit; cwd/FD inheritance is explicit
+spawn behavior. No close-on-exec flag, fork, process groups or signal delivery yet.
+
+wait options are 0 (block) or 1 (WNOHANG); no matching child returns ECHILD.
+Invalid status memory never reaps a completed child. Waiting saves the complete
+post-SVC frame and lets ready children run; exit wakes the parent. exec preserves
+PID/cwd/descriptors but resets the register/FP state and timer budget. Yield and
+Generic Physical Timer IRQs select ready processes through the CPU0 runner.
+The kernel root/full TLBI are restored before any old page or FD is reclaimed.
+
+Added errno values: ENOENT=2, EIO=5, ENOEXEC=8, ECHILD=10, EAGAIN=11, ENOMEM=12,
+EACCES=13, EBUSY=16, EEXIST=17, ENOTDIR=20, EISDIR=21, EMFILE=24, EFBIG=27,
+ENOSPC=28, ESPIPE=29, EROFS=30, ERANGE=34, ENAMETOOLONG=36, ENOTEMPTY=39.
+Existing EBADF/EFAULT/EINVAL/ENOSYS retain their values and signed return convention.
+See [M4 implementation](../filesystem.md) for capacity and hardware boundaries.

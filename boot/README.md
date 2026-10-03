@@ -152,6 +152,15 @@ terminating handlers discard it and resume the 256-byte saved kernel runner.
 See [M3 execution](../docs/userspace.md) for register initialization, private
 stack ownership, root switching and hardware acceptance.
 
+The `filesystem` feature additionally links `boot/resume.S`. Its runner saves
+the same 256-byte EL1 frame as `boot/user.S`, then restores a complete frozen
+816-byte process frame directly from kernel-owned static storage. x17 holds
+that frame pointer until the last x16/x17 load; ERET leaves SP_EL1 pointing at
+the suspended runner. Yield/wait/timer switches return through the existing
+terminating-vector action; the EL1 scheduler restores the kernel root and
+completes TLBI before reclaiming any process page. No Rust session borrow spans
+ERET. See [filesystem execution](../docs/filesystem.md).
+
 References:
 
 - Arm's [AAPCS64 SIMD and floating-point register contract](https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst#simd-and-floating-point-registers).

@@ -1,4 +1,4 @@
-//! Host-testable, allocation-free kernel memory algorithms.
+//! Host-testable no_std memory, userspace ABI, ELF, process and VFS algorithms.
 #![no_std]
 
 #[cfg(test)]
@@ -8,6 +8,7 @@ extern crate std;
 // with it so host tests exercise the same parser and allocator implementation.
 #[path = "memory/fdt.rs"]
 pub mod fdt;
+pub mod fs;
 #[path = "memory/heap.rs"]
 pub mod heap;
 #[path = "memory/mapping.rs"]
@@ -28,8 +29,12 @@ pub mod memory {
 }
 pub mod userspace {
     pub mod abi;
+    pub mod copy;
+    pub mod elf;
     pub mod fault;
+    pub mod files;
     pub mod preflight;
+    pub mod process;
     pub mod space;
     pub mod syscall;
     #[cfg(test)]

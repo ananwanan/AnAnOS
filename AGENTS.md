@@ -20,6 +20,7 @@ AnanOS is a small bare-metal operating system written in Rust for the Raspberry 
 - Current execution model: CPU0 runs; secondary cores park in `wfe`
 - Current kernel runtime EL: EL1h
 - Optional `userspace` feature: private EL0t tasks with SVC entry and return to EL1h; see `docs/abi/README.md`
+- Optional `filesystem` feature: static ELF processes, bounded CPU0 scheduling, initramfs/RAM FS and private FD/cwd; see `docs/filesystem.md`
 - MMU: disabled in the default build; opt-in `mmu` feature enables an EL1 identity map
 - Data cache: disabled
 - Instruction cache: disabled

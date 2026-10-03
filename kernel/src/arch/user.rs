@@ -8,6 +8,23 @@ use core::arch::global_asm;
 use crate::userspace::abi::{self, Errno};
 use crate::userspace::space::USER_CODE;
 
+#[cfg(feature = "filesystem")]
+global_asm!(include_str!("../../../boot/resume.S"));
+
+#[cfg(feature = "filesystem")]
+unsafe extern "C" {
+    fn arch_resume_user(frame: *const crate::arch::context::ExceptionFrame) -> u64;
+}
+
+/// Resume a frozen kernel-owned frame under its validated task root.
+/// # Safety
+/// Same CPU0/vector/root requirements as `run`; the complete frame must stay
+/// readable until ERET, originate from EL0t, and contain valid EL0 PC/SP state.
+#[cfg(feature = "filesystem")]
+pub unsafe fn resume(frame: *const crate::arch::context::ExceptionFrame) -> u64 {
+    unsafe { arch_resume_user(frame) }
+}
+
 global_asm!(
     include_str!("../../../boot/user.S"),
     sys_write = const abi::SYS_WRITE,
