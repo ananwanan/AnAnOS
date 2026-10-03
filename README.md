@@ -6,6 +6,11 @@ Physical RAM discovery, reservations, the 4 KiB page allocator and the 1 MiB
 kernel heap are described in [docs/memory.md](docs/memory.md), including host
 tests and the separate Raspberry Pi hardware verification steps.
 
+Implementation milestones and acceptance gates are tracked in
+[docs/ROADMAP.md](docs/ROADMAP.md). Run
+`.\scripts\check_windows.ps1` for host logic tests, workspace checks and both
+boot images; this does not deploy to a board or prove hardware behavior.
+
 Current Target:
 
 - Raspberry Pi 4B

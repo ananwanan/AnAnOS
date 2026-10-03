@@ -97,3 +97,50 @@ bootloader、DTB 缓冲区和栈都不超过内核加载地址 `0x200000`。
 VideoCore/framebuffer 和 MMIO 排除后，再初始化物理页分配器和内核堆。
 `__kernel_end` 包含 BSS 中的页位图与 64 KiB 栈。
 详见 [内存设计说明](../docs/memory.md)。
+
+## Entry and exception context contract
+
+The kernel masks all DAIF exceptions immediately on entry, before setting up
+the stack or accessing Rust globals. CPU0 alone clears `.bss`; secondary CPUs
+remain parked. The DTB address stays in `x20` until it is passed to
+`kernel_main` in `x0`; on the UART path it points to the bootloader's preserved
+copy described above.
+
+The normal UART bootloader path enters at EL2. A direct EL1 handoff is also
+accepted, provided `SCTLR_EL1.M/C/I` are already clear and the higher exception
+levels permit physical timer and FP/SIMD access. EL1 cannot configure the EL2
+trap controls. An inherited active MMU or cache is rejected by parking the CPU;
+switching off live translations or a dirty cache needs a dedicated handoff
+protocol and is outside this physical-address boot path. Both paths establish
+the SCTLR RES1 bits, little-endian accesses, EL1h stack selection and
+`CPACR_EL1.FPEN = 0b11` before calling Rust.
+
+`boot/vectors.S` saves an 800-byte, 16-byte-aligned exception frame for the
+handled EL1h synchronous exceptions and IRQs:
+
+| Byte offset | Saved state |
+| --- | --- |
+| 0..247 | `x0` through `x30` |
+| 248 | `ELR_EL1` |
+| 256 | `SPSR_EL1` |
+| 264 | `ESR_EL1` |
+| 272..783 | Full 128-bit `q0` through `q31` |
+| 784 | `FPCR` in a 64-bit slot |
+| 792 | `FPSR` in a 64-bit slot |
+
+The first 272 bytes remain the `#[repr(C)] ExceptionContext` exposed to Rust.
+The FP/SIMD extension is saved and restored by assembly. Normal AAPCS64 calls
+only preserve a subset of vector state; an exception can interrupt a live
+vector computation at any instruction, so the entry code preserves all of it.
+This covers Cortex-A72 FP/Advanced SIMD; it does not claim SVE/SME support.
+Lower-EL vectors remain unimplemented until the separate EL0 milestone.
+
+References:
+
+- Arm's [AAPCS64 SIMD and floating-point register contract](https://github.com/ARM-software/abi-aa/blob/main/aapcs64/aapcs64.rst#simd-and-floating-point-registers).
+- Arm's [Cortex-A72 Technical Reference Manual](https://documentation-service.arm.com/static/60368ce38f952d2e4134dc2e), section 4.3.32, defines `CPACR_EL1.FPEN` access control.
+- Raspberry Pi's [BCM2711 ARM Peripherals](https://datasheets.raspberrypi.org/bcm2711/bcm2711-peripherals.pdf), table 10, defines Mini UART `LSR[6]` as FIFO empty and transmitter idle. The bootloader waits for this before handing off, so kernel UART initialization cannot discard the final upload acknowledgement.
+
+Build/image checks verify syntax and layout. Confirm BRK return and sustained
+timer IRQ operation using real Raspberry Pi UART output before marking these
+paths hardware-validated.

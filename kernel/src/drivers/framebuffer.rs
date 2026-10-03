@@ -23,6 +23,8 @@ pub enum FrameBufferError {
     Mailbox(MailboxError),
     InvalidResponse,
     InvalidDimensions,
+    InvalidPitch,
+    InvalidAddress,
     UnsupportedDepth(u32),
     NullAddress,
     BufferTooSmall,
@@ -179,6 +181,11 @@ impl FrameBuffer {
             return Err(FrameBufferError::UnsupportedDepth(depth));
         }
 
+        let row_bytes = width.checked_mul(4).ok_or(FrameBufferError::InvalidPitch)?;
+        if pitch < row_bytes || pitch & 3 != 0 {
+            return Err(FrameBufferError::InvalidPitch);
+        }
+
         if framebuffer_bus_address == 0 {
             return Err(FrameBufferError::NullAddress);
         }
@@ -196,6 +203,14 @@ impl FrameBuffer {
          * 得到 ARM 当前可访问的物理地址。
          */
         let arm_address = (framebuffer_bus_address & VC_ADDRESS_MASK) as usize;
+        if arm_address == 0
+            || arm_address & 3 != 0
+            || arm_address
+                .checked_add(size as usize)
+                .is_none_or(|end| end > 0x4000_0000)
+        {
+            return Err(FrameBufferError::InvalidAddress);
+        }
 
         Ok(Self {
             address: arm_address as *mut u8,

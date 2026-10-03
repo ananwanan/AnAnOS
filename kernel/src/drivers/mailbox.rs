@@ -194,7 +194,9 @@ struct FirmwareRevisionMessage {
 }
 
 impl Mailbox {
-    /// Firmware-owned physical memory. DT /memory is used separately for RAM
+    /// Firmware-owned physical RAM must remain outside the page allocator.
+    /// Values are ARM physical base/size, not a VideoCore bus address.
+    /// DT /memory is used separately for RAM
     /// discovery because this tag's 32-bit fields cannot describe high banks.
     pub fn vc_memory(&self) -> Result<(usize, usize), MailboxError> {
         #[repr(C, align(16))]
@@ -202,7 +204,7 @@ impl Mailbox {
 
         let mut message = Message([32, REQUEST_CODE, TAG_GET_VC_MEMORY, 8, 0, 0, 0, END_TAG]);
         self.property_call(message.0.as_mut_ptr())?;
-        if message.0[4] != 0x8000_0008 {
+        if message.0[4] & 0x8000_0000 == 0 || message.0[4] & 0x7fff_ffff < 8 {
             return Err(MailboxError::InvalidResponse);
         }
         Ok((message.0[5] as usize, message.0[6] as usize))

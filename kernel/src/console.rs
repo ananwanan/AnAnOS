@@ -1,4 +1,4 @@
-use core::cell::UnsafeCell;
+use core::cell::{Cell, UnsafeCell};
 use core::fmt::{self, Write};
 
 use crate::drivers::framebuffer::FrameBuffer;
@@ -52,31 +52,41 @@ impl KernelConsole {
 
 /// 为全局可变控制台提供内部可变性。
 ///
-/// 当前约束：
-/// - 只运行 CPU0
-/// - 尚未开启中断
-/// - 所有日志同步执行
-///
-/// 开启中断或多核前必须替换成自旋锁。
+/// CPU0 accesses are IRQ-masked; synchronous exception/panic reentry falls
+/// back to UART without borrowing the framebuffer again. Not an SMP lock.
 struct ConsoleCell {
     inner: UnsafeCell<KernelConsole>,
+    busy: Cell<bool>,
 }
 
 impl ConsoleCell {
     const fn new() -> Self {
         Self {
             inner: UnsafeCell::new(KernelConsole::new()),
+            busy: Cell::new(false),
         }
     }
 
-    fn with<R>(&self, function: impl FnOnce(&mut KernelConsole) -> R) -> R {
-        unsafe { function(&mut *self.inner.get()) }
+    fn with<R>(&self, function: impl FnOnce(&mut KernelConsole) -> R) -> Option<R> {
+        crate::arch::interrupt::with_irq_masked(|| {
+            if self.busy.replace(true) {
+                return None;
+            }
+            struct Release<'a>(&'a Cell<bool>);
+            impl Drop for Release<'_> {
+                fn drop(&mut self) {
+                    self.0.set(false);
+                }
+            }
+            let _release = Release(&self.busy);
+            // CPU0 owns this cell, IRQ is masked, and reentry was excluded.
+            Some(unsafe { function(&mut *self.inner.get()) })
+        })
     }
 }
 
 /*
- * 我们手动保证现阶段不会并发访问。
- * 开启中断或多核之后，这个保证将不再成立。
+ * Secondary cores are parked. The IRQ guard and busy flag serialize CPU0.
  */
 unsafe impl Sync for ConsoleCell {}
 
@@ -90,9 +100,14 @@ pub fn install_framebuffer(framebuffer: FrameBuffer) {
 
 #[doc(hidden)]
 pub fn _print(arguments: fmt::Arguments<'_>) {
-    CONSOLE.with(|console| {
-        console.write_arguments(arguments);
-    });
+    if CONSOLE
+        .with(|console| {
+            console.write_arguments(arguments);
+        })
+        .is_none()
+    {
+        let _ = MiniUart::new().write_fmt(arguments);
+    }
 }
 
 pub fn set_screen_foreground(color: u32) {

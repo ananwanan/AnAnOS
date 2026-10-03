@@ -20,6 +20,7 @@ use drivers::framebuffer::FrameBuffer;
 use drivers::gic::Gic;
 use drivers::mailbox::Mailbox;
 use drivers::uart::MiniUart;
+use memory::regions::Region;
 
 global_asm!(include_str!("../../boot/boot.S"));
 global_asm!(include_str!("../../boot/vectors.S"));
@@ -61,12 +62,12 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
     println!("Board       : Raspberry Pi 4B");
     println!("Architecture: AArch64");
 
+    // Install vectors before dereferencing firmware pointers or initializing devices.
+    arch::exception::init();
+
     init_mailbox();
 
     let framebuffer_region = init_framebuffer();
-
-    // 初始化异常向量
-    arch::exception::init();
 
     println!("DTB address : {dtb_address:#018x}");
     // Firmware/bootloader provides the readable DTB; memory init excludes all
@@ -93,9 +94,6 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
         // 测试异常向量
         // test::test_exception();
     }
-
-    println!("DTB address : {dtb_address:#018x}");
-    println!();
 
     println!();
     println!("INITIALIZING INTERRUPTS...");
@@ -177,12 +175,6 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
             core::arch::asm!("wfi", options(nomem, nostack, preserves_flags),);
         }
     }
-
-    loop {
-        unsafe {
-            asm!("wfe");
-        }
-    }
 }
 
 /// 初始化 Mailbox 并获取固件修订号。
@@ -201,17 +193,20 @@ fn init_mailbox() {
 }
 
 /// 初始化 Framebuffer 并绘制测试图案。
-fn init_framebuffer() -> Option<memory::regions::Region> {
+fn init_framebuffer() -> Option<Region> {
     println!();
     println!("Initializing framebuffer...");
 
     match FrameBuffer::new(1920, 1080) {
         Ok(framebuffer) => {
             // Returned physical address and allocation size are authoritative.
-            let region = memory::regions::Region {
-                start: framebuffer.address(),
-                end: framebuffer.address() + framebuffer.size() as usize,
-            };
+            let region = Region::new(framebuffer.address(), framebuffer.size() as usize).ok()?;
+            let (width, height, depth, pitch) = (
+                framebuffer.width(),
+                framebuffer.height(),
+                framebuffer.depth(),
+                framebuffer.pitch(),
+            );
             // 安装前，这些日志只输出到 UART。
             println!("[ OK ] Framebuffer allocated");
             println!("Address    : {:#018x}", framebuffer.address());
@@ -245,9 +240,9 @@ fn init_framebuffer() -> Option<memory::regions::Region> {
             println!();
             println!("BOARD       : RASPBERRY PI 4B");
             println!("ARCHITECTURE: AARCH64");
-            println!("RESOLUTION  : 1920X1080");
-            println!("DEPTH       : 32 BIT");
-            println!("PITCH       : 7680 BYTES");
+            println!("RESOLUTION  : {width}X{height}");
+            println!("DEPTH       : {depth} BIT");
+            println!("PITCH       : {pitch} BYTES");
             println!();
             println!("WELCOME TO ANANOS!");
             Some(region)

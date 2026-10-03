@@ -99,6 +99,7 @@ impl Drop for InterruptGuard {
 
 struct PageState {
     allocator: PageAllocator,
+    ready: bool,
     // Retain ownership forever: the heap's backing pages cannot be freed via
     // the public page API while heap objects still reference them.
     heap_pages: Option<PhysicalPages>,
@@ -106,32 +107,51 @@ struct PageState {
 
 static PAGES: Cpu0Cell<PageState> = Cpu0Cell::new(PageState {
     allocator: PageAllocator::new(),
+    ready: false,
     heap_pages: None,
 });
 
-struct KernelAllocator(Cpu0Cell<Heap>);
+struct HeapState {
+    heap: Heap,
+    enabled: bool,
+}
+
+struct KernelAllocator(Cpu0Cell<HeapState>);
 
 // SAFETY: Heap's ownership contract is established once by bootstrap. CPU0Cell
 // serializes access without allocation or logging. Exhaustion returns null.
 unsafe impl GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        self.0.with(|heap| unsafe { heap.allocate(layout) })
+        self.0.with(|state| {
+            if state.enabled {
+                unsafe { state.heap.allocate(layout) }
+            } else {
+                ptr::null_mut()
+            }
+        })
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        self.0
-            .with(|heap| unsafe { heap.deallocate(pointer, layout) });
+        self.0.with(|state| {
+            if state.enabled {
+                unsafe { state.heap.deallocate(pointer, layout) };
+            }
+        });
     }
 }
 
 #[global_allocator]
-static KERNEL_ALLOCATOR: KernelAllocator = KernelAllocator(Cpu0Cell::new(Heap::new()));
+static KERNEL_ALLOCATOR: KernelAllocator = KernelAllocator(Cpu0Cell::new(HeapState {
+    heap: Heap::new(),
+    enabled: false,
+}));
 
 /// Identify RAM/reservations first, test page ownership, then donate a page run
 /// to the heap. Missing/invalid input never falls back to a guessed RAM size.
 ///
 /// # Safety
 /// Must run once on CPU0, using the firmware DTB forwarded by early boot.
+/// IRQ/FIQ must remain masked until initialization and self-tests return.
 /// The DTB header and its declared size must be readable immutable physical RAM.
 /// The framebuffer range, if supplied, must cover the complete firmware buffer.
 pub unsafe fn init(
@@ -186,6 +206,14 @@ pub unsafe fn init(
     // SAFETY: full length was checked above; bootloader keeps this copy alive.
     let blob = unsafe { core::slice::from_raw_parts(dtb_address as *const u8, size) };
     let layout = fdt::parse_with_reserved(blob, reserved.as_slice())?;
+    if !layout
+        .ram
+        .as_slice()
+        .iter()
+        .any(|ram| ram.start <= dtb_address && ram.end >= end)
+    {
+        return Err(MemoryError::InvalidDtbAddress);
+    }
 
     crate::println!("[INFO] PHYSICAL MEMORY (4 KIB PAGES)");
     for region in layout.ram.as_slice() {
@@ -209,7 +237,7 @@ pub unsafe fn init(
         // ownership is retained in PageState for the entire kernel lifetime.
         let result = KERNEL_ALLOCATOR
             .0
-            .with(|heap| unsafe { heap.init(address, HEAP_SIZE) });
+            .with(|state| unsafe { state.heap.init(address, HEAP_SIZE) });
         if let Err(error) = result {
             state.allocator.free_pages(pages)?;
             return Err(MemoryError::Heap(error));
@@ -217,18 +245,45 @@ pub unsafe fn init(
         state.heap_pages = Some(pages);
         Ok(())
     })?;
-    heap_self_test()?;
+    // Boot owns CPU0 with IRQ/FIQ masked. Enable the registered allocator only
+    // for its self-test; failed validation makes subsequent allocations fail.
+    KERNEL_ALLOCATOR.0.with(|state| state.enabled = true);
+    if let Err(error) = heap_self_test() {
+        KERNEL_ALLOCATOR.0.with(|state| state.enabled = false);
+        return Err(error);
+    }
+    PAGES.with(|state| state.ready = true);
     crate::println!("[ OK ] KERNEL HEAP: {} BYTES", HEAP_SIZE);
     crate::println!("[ OK ] HEAP ALLOCATION/FREE SELF-TEST");
     Ok(page_stats())
 }
 
 pub fn allocate_pages(count: usize, alignment_pages: usize) -> Result<PhysicalPages, PageError> {
-    PAGES.with(|state| state.allocator.alloc_pages(count, alignment_pages))
+    PAGES.with(|state| {
+        if !state.ready {
+            return Err(PageError::NotInitialized);
+        }
+        state.allocator.alloc_pages(count, alignment_pages)
+    })
+}
+
+/// Return an exclusively owned run with every byte cleared before exposure.
+pub fn allocate_zeroed_pages(
+    count: usize,
+    alignment_pages: usize,
+) -> Result<PhysicalPages, PageError> {
+    let pages = allocate_pages(count, alignment_pages)?;
+    zero_pages(&pages);
+    Ok(pages)
 }
 
 pub fn free_pages(pages: PhysicalPages) -> Result<(), PageError> {
-    PAGES.with(|state| state.allocator.free_pages(pages))
+    PAGES.with(|state| {
+        if !state.ready {
+            return Err(PageError::NotInitialized);
+        }
+        state.allocator.free_pages(pages)
+    })
 }
 
 pub fn page_stats() -> PageStats {
@@ -236,14 +291,27 @@ pub fn page_stats() -> PageStats {
 }
 
 pub fn heap_free_bytes() -> usize {
-    KERNEL_ALLOCATOR.0.with(|heap| heap.free_bytes())
+    KERNEL_ALLOCATOR.0.with(|state| state.heap.free_bytes())
+}
+
+fn zero_pages(pages: &PhysicalPages) {
+    // SAFETY: the token exclusively owns page-aligned writable RAM. Volatile
+    // aligned stores avoid unaligned/exclusive accesses with MMU/cache off.
+    for word in 0..pages.byte_len() / core::mem::size_of::<u64>() {
+        unsafe { ptr::write_volatile((pages.start_address() as *mut u64).add(word), 0) };
+    }
 }
 
 fn page_self_test() -> Result<(), MemoryError> {
     let before = page_stats();
-    let pages = allocate_pages(2, 2)?;
+    // Bootstrap-only access: public page allocation remains unavailable until
+    // page and heap validation have both succeeded.
+    let pages = PAGES.with(|state| state.allocator.alloc_pages(2, 2))?;
+    zero_pages(&pages);
     let start = pages.start_address();
     let tail = start + pages.byte_len() - core::mem::size_of::<u64>();
+    let zeroed = (0..pages.byte_len() / core::mem::size_of::<u64>())
+        .all(|word| unsafe { ptr::read_volatile((start as *const u64).add(word)) == 0 });
     // SAFETY: pages belong exclusively to this test, addresses are u64 aligned.
     let valid = unsafe {
         ptr::write_volatile(start as *mut u64, 0xA11A_0000_1234_5678);
@@ -251,8 +319,8 @@ fn page_self_test() -> Result<(), MemoryError> {
         ptr::read_volatile(start as *const u64) == 0xA11A_0000_1234_5678
             && ptr::read_volatile(tail as *const u64) == 0x55AA_F00D_DEAD_BEEF
     };
-    free_pages(pages)?;
-    if !valid || page_stats() != before {
+    PAGES.with(|state| state.allocator.free_pages(pages))?;
+    if !zeroed || !valid || page_stats() != before {
         return Err(MemoryError::SelfTest);
     }
     Ok(())

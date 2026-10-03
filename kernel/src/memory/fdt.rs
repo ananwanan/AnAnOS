@@ -37,6 +37,8 @@ pub enum FdtError {
     MissingRam,
     MissingReg,
     InvalidReg,
+    InvalidProperty,
+    UnsupportedMemory,
     UnsupportedTranslation,
     InvalidDynamicReservation,
     DynamicReservationCapacity,
@@ -153,6 +155,9 @@ struct Node<'a> {
     alloc_ranges: Option<&'a [u8]>,
     initrd_start: Option<&'a [u8]>,
     initrd_end: Option<&'a [u8]>,
+    no_map: bool,
+    reusable: bool,
+    usable_memory: bool,
 }
 
 impl<'a> Node<'a> {
@@ -177,6 +182,9 @@ impl<'a> Node<'a> {
         alloc_ranges: None,
         initrd_start: None,
         initrd_end: None,
+        no_map: false,
+        reusable: false,
+        usable_memory: false,
     };
 
     fn property(&mut self, name: &[u8], value: &'a [u8]) -> Result<(), FdtError> {
@@ -211,6 +219,25 @@ impl<'a> Node<'a> {
             b"alloc-ranges" => set_once(&mut self.alloc_ranges, value)?,
             b"linux,initrd-start" => set_once(&mut self.initrd_start, value)?,
             b"linux,initrd-end" => set_once(&mut self.initrd_end, value)?,
+            b"no-map" | b"reusable" if self.kind == Kind::ReservedChild => {
+                if !value.is_empty() {
+                    return Err(FdtError::InvalidProperty);
+                }
+                let flag = if name == b"no-map" {
+                    &mut self.no_map
+                } else {
+                    &mut self.reusable
+                };
+                if *flag {
+                    return Err(FdtError::DuplicateProperty);
+                }
+                *flag = true;
+            }
+            b"linux,usable-memory" | b"linux,usable-memory-range" => {
+                // Crash-kernel RAM restrictions require an explicit policy;
+                // ignoring them would expose memory outside the usable range.
+                self.usable_memory = true;
+            }
             _ => {}
         }
         Ok(())
@@ -239,6 +266,9 @@ impl<'a> Node<'a> {
         if !self.enabled {
             return Ok(());
         }
+        if self.usable_memory && matches!(self.kind, Kind::Memory | Kind::Chosen) {
+            return Err(FdtError::UnsupportedMemory);
+        }
         if let Some(device_type) = self.device_type {
             let device_type = property_string(device_type)?;
             if device_type == b"memory" && self.kind != Kind::Memory {
@@ -259,6 +289,9 @@ impl<'a> Node<'a> {
             ),
             Kind::ReservedRoot => self.validate_reserved_bus(),
             Kind::ReservedChild => {
+                if self.no_map && self.reusable {
+                    return Err(FdtError::InvalidProperty);
+                }
                 if let Some(reg) = self.reg {
                     // Static reg takes precedence over size. Even reusable
                     // reservations stay excluded until there is an explicit
@@ -840,6 +873,134 @@ mod tests {
 
     fn expect_error(blob: &[u8], expected: FdtError) {
         assert_eq!(parse(blob).unwrap_err(), expected);
+    }
+
+    #[test]
+    fn rejects_unsupported_usable_memory_restrictions() {
+        for property in ["linux,usable-memory", "linux,usable-memory-range"] {
+            for node in ["memory@0", "chosen"] {
+                let mut dtb = Dtb::new();
+                dtb.root(1, 1);
+                if node == "chosen" {
+                    dtb.memory32(0, 0x10000);
+                }
+                dtb.begin(node);
+                if node == "memory@0" {
+                    dtb.property("device_type", b"memory\0");
+                    dtb.cells("reg", &[0, 0x10000]);
+                }
+                dtb.cells(property, &[0x4000, 0x4000]);
+                dtb.end();
+                expect_error(&dtb.finish(), FdtError::UnsupportedMemory);
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_usable_memory_restrictions_do_not_contribute_ram() {
+        for property in ["linux,usable-memory", "linux,usable-memory-range"] {
+            for node in ["memory@10000", "chosen"] {
+                let mut dtb = Dtb::new();
+                dtb.root(1, 1);
+                dtb.memory32(0, 0x10000);
+                dtb.begin(node);
+                dtb.property("status", b"disabled\0");
+                if node == "memory@10000" {
+                    dtb.property("device_type", b"memory\0");
+                    dtb.cells("reg", &[0x10000, 0x10000]);
+                }
+                dtb.cells(property, &[0x14000, 0x4000]);
+                dtb.end();
+                let layout = parse(&dtb.finish()).unwrap();
+                assert_eq!(
+                    layout.ram.as_slice(),
+                    &[Region {
+                        start: 0,
+                        end: 0x10000
+                    }]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reservation_flags_reject_values_and_duplicates() {
+        for flag in ["no-map", "reusable"] {
+            for duplicate in [false, true] {
+                let mut dtb = Dtb::new();
+                dtb.root(1, 1);
+                dtb.memory32(0, 0x10000);
+                dtb.reserved32();
+                dtb.begin("pool@4000");
+                dtb.cells("reg", &[0x4000, 0x1000]);
+                if duplicate {
+                    dtb.property(flag, &[]);
+                    dtb.property(flag, &[]);
+                } else {
+                    dtb.cells(flag, &[1]);
+                }
+                dtb.end();
+                dtb.end();
+                expect_error(
+                    &dtb.finish(),
+                    if duplicate {
+                        FdtError::DuplicateProperty
+                    } else {
+                        FdtError::InvalidProperty
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_map_and_reusable_are_mutually_exclusive_for_static_and_dynamic_pools() {
+        for dynamic in [false, true] {
+            let mut dtb = Dtb::new();
+            dtb.root(1, 1);
+            dtb.memory32(0, 0x10000);
+            dtb.reserved32();
+            dtb.begin("pool");
+            if dynamic {
+                dtb.cells("size", &[0x1000]);
+            } else {
+                dtb.cells("reg", &[0x4000, 0x1000]);
+            }
+            dtb.property("no-map", &[]);
+            dtb.property("reusable", &[]);
+            dtb.end();
+            dtb.end();
+            expect_error(&dtb.finish(), FdtError::InvalidProperty);
+        }
+    }
+
+    #[test]
+    fn valid_no_map_and_reusable_pools_both_remain_reserved() {
+        let mut dtb = Dtb::new();
+        dtb.root(1, 1);
+        dtb.memory32(0, 0x10000);
+        dtb.reserved32();
+        for (flag, start) in [("no-map", 0x4000), ("reusable", 0x8000)] {
+            dtb.begin("pool");
+            dtb.cells("reg", &[start, 0x1000]);
+            dtb.property(flag, &[]);
+            dtb.end();
+        }
+        dtb.end();
+        let layout = parse(&dtb.finish()).unwrap();
+        assert_eq!(
+            layout.reserved.as_slice(),
+            &[
+                Region {
+                    start: 0x4000,
+                    end: 0x5000
+                },
+                Region {
+                    start: 0x8000,
+                    end: 0x9000
+                }
+            ]
+        );
     }
 
     #[test]
