@@ -6,6 +6,14 @@ Physical RAM discovery, reservations, the 4 KiB page allocator and the 1 MiB
 kernel heap are described in [docs/memory.md](docs/memory.md), including host
 tests and the separate Raspberry Pi hardware verification steps.
 
+The opt-in M2 EL1 identity map, page tables and memory attributes are described
+in [docs/mmu.md](docs/mmu.md). Build it with `build_windows.ps1 -EnableMmu`;
+the default image keeps MMU and caches disabled.
+
+The optional [MMU -> EL0 path](docs/userspace.md) adds isolated user pages,
+SVC write/exit, protected stacks and fault/IRQ return with page reclamation.
+Build `kernel8-el0.img` with `build_windows.ps1 -EnableUserspace`.
+
 Implementation milestones and acceptance gates are tracked in
 [docs/ROADMAP.md](docs/ROADMAP.md). Run
 `.\scripts\check_windows.ps1` for host logic tests, workspace checks and both

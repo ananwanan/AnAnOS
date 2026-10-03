@@ -6,18 +6,26 @@
 
 .extern rust_sync_exception
 .extern rust_irq_exception
+.ifdef ANANOS_USERSPACE
+.extern rust_user_sync_exception
+.extern rust_user_irq_exception
+.extern arch_user_return
+.endif
 
 /*
  * The first 272 bytes match Rust's repr(C) ExceptionContext. The remaining
  * state is private to assembly: q0..q31 at 272..783, FPCR at 784, FPSR at 792.
  * An exception can interrupt any instruction, so the ordinary AAPCS64
  * callee-saved subset is insufficient; preserve every 128-bit SIMD register.
- * 800 bytes keeps the interrupted 16-byte stack alignment at the Rust call.
+ * SP_EL0 and FAR_EL1 follow at 800 and 808. The full 816-byte frame preserves
+ * interrupted stack alignment for EL1h and lower-EL AArch64 exceptions alike.
  */
-.equ CONTEXT_SIZE,   800
+.equ CONTEXT_SIZE,   816
 .equ SIMD_OFFSET,    272
 .equ FPCR_OFFSET,    784
 .equ FPSR_OFFSET,    792
+.equ USER_SP_OFFSET, 800
+.equ FAR_OFFSET,     808
 
 .if (CONTEXT_SIZE % 16) != 0
     .error "exception frame must preserve AAPCS64 stack alignment"
@@ -28,7 +36,13 @@
 .if FPCR_OFFSET != (SIMD_OFFSET + 32 * 16)
     .error "FPCR slot overlaps SIMD state"
 .endif
-.if CONTEXT_SIZE != (FPSR_OFFSET + 8)
+.if USER_SP_OFFSET != (FPSR_OFFSET + 8)
+    .error "SP_EL0 must follow the saved floating-point state"
+.endif
+.if FAR_OFFSET != (USER_SP_OFFSET + 8)
+    .error "FAR_EL1 must follow SP_EL0"
+.endif
+.if CONTEXT_SIZE != (FAR_OFFSET + 8)
     .error "exception frame tail does not match its allocation"
 .endif
 
@@ -89,6 +103,10 @@
     str x0, [sp, #FPCR_OFFSET]
     mrs x0, fpsr
     str x0, [sp, #FPSR_OFFSET]
+    mrs x0, sp_el0
+    str x0, [sp, #USER_SP_OFFSET]
+    mrs x0, far_el1
+    str x0, [sp, #FAR_OFFSET]
 .endm
 
 
@@ -120,6 +138,8 @@
     msr fpcr, x0
     ldr x0, [sp, #FPSR_OFFSET]
     msr fpsr, x0
+    ldr x0, [sp, #USER_SP_OFFSET]
+    msr sp_el0, x0
 
     ldp x0,  x1,  [sp, #(0  * 8)]
     ldp x2,  x3,  [sp, #(2  * 8)]
@@ -219,10 +239,46 @@ current_spx_serror:
 
 
 lower_a64_sync:
+.ifdef ANANOS_USERSPACE
+    SAVE_CONTEXT
+
+    /* Rust kernel code must not inherit an EL0-controlled FP environment. */
+    msr fpcr, xzr
+    msr fpsr, xzr
+
+    mov x0, sp
+    bl rust_user_sync_exception
+    cbnz x0, user_exception_return
+
+    RESTORE_CONTEXT
+    eret
+.else
     b exception_unhandled
+.endif
 
 lower_a64_irq:
+.ifdef ANANOS_USERSPACE
+    SAVE_CONTEXT
+
+    msr fpcr, xzr
+    msr fpsr, xzr
+
+    mov x0, sp
+    bl rust_user_irq_exception
+    cbnz x0, user_exception_return
+
+    RESTORE_CONTEXT
+    eret
+.else
     b exception_unhandled
+.endif
+
+.ifdef ANANOS_USERSPACE
+/* The CPU is in EL1h and SP_EL1 now points at the suspended runner frame. */
+user_exception_return:
+    add sp, sp, #CONTEXT_SIZE
+    b arch_user_return
+.endif
 
 lower_a64_fiq:
     b exception_unhandled

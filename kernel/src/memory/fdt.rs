@@ -21,6 +21,31 @@ const DEFAULT_DYNAMIC_ALIGNMENT: usize = 4096;
 pub struct MemoryLayout {
     pub ram: RegionSet,
     pub reserved: RegionSet,
+    /// Enabled reserved-memory nodes carrying `no-map`. These bytes remain
+    /// reserved and must additionally stay outside the kernel's direct map.
+    pub unmapped: RegionSet,
+}
+
+impl MemoryLayout {
+    pub const fn new() -> Self {
+        Self {
+            ram: RegionSet::new(),
+            reserved: RegionSet::new(),
+            unmapped: RegionSet::new(),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.ram.clear();
+        self.reserved.clear();
+        self.unmapped.clear();
+    }
+}
+
+impl Default for MemoryLayout {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -301,7 +326,16 @@ impl<'a> Node<'a> {
                         self.parent_address_cells,
                         self.parent_size_cells,
                         &mut layout.reserved,
-                    )
+                    )?;
+                    if self.no_map {
+                        parse_regions(
+                            reg,
+                            self.parent_address_cells,
+                            self.parent_size_cells,
+                            &mut layout.unmapped,
+                        )?;
+                    }
+                    Ok(())
                 } else if let Some(size) = self.size {
                     validate_cells(self.parent_address_cells, self.parent_size_cells)?;
                     if size.len() != self.parent_size_cells as usize * 4 {
@@ -331,6 +365,7 @@ impl<'a> Node<'a> {
                         ranges: self.alloc_ranges,
                         address_cells: self.parent_address_cells,
                         size_cells: self.parent_size_cells,
+                        no_map: self.no_map,
                     })
                 } else {
                     Err(FdtError::MissingReg)
@@ -364,12 +399,33 @@ pub fn parse(blob: &[u8]) -> Result<MemoryLayout, FdtError> {
 /// Dynamic requests receive a first-fit aligned physical span. This resolves
 /// the DT allocation request; it does not initialize a CMA pool or its driver.
 pub fn parse_with_reserved(blob: &[u8], initial: &[Region]) -> Result<MemoryLayout, FdtError> {
+    let mut layout = MemoryLayout::new();
+    parse_into(blob, initial, &mut layout)?;
+    Ok(layout)
+}
+
+/// Parse into caller-owned storage without copying the memory map on the boot
+/// stack. Any error clears all three sets, including a previous successful map.
+pub fn parse_into(
+    blob: &[u8],
+    initial: &[Region],
+    output: &mut MemoryLayout,
+) -> Result<(), FdtError> {
+    output.clear();
+    let result = parse_into_inner(blob, initial, output);
+    if result.is_err() {
+        output.clear();
+    }
+    result
+}
+
+fn parse_into_inner(
+    blob: &[u8],
+    initial: &[Region],
+    layout: &mut MemoryLayout,
+) -> Result<(), FdtError> {
     let header = Header::read(blob)?;
     let blob = &blob[..header.total_size];
-    let mut layout = MemoryLayout {
-        ram: RegionSet::new(),
-        reserved: RegionSet::new(),
-    };
     for region in initial {
         layout.reserved.insert(*region)?;
     }
@@ -445,7 +501,7 @@ pub fn parse_with_reserved(blob: &[u8], initial: &[Region]) -> Result<MemoryLayo
                     return Err(FdtError::MalformedStructure);
                 }
                 depth -= 1;
-                nodes[depth].finish(&mut layout, &mut dynamic)?;
+                nodes[depth].finish(layout, &mut dynamic)?;
             }
             FDT_PROP => {
                 if depth == 0 || nodes[depth - 1].children_started {
@@ -480,8 +536,8 @@ pub fn parse_with_reserved(blob: &[u8], initial: &[Region]) -> Result<MemoryLayo
                 if layout.ram.as_slice().is_empty() {
                     return Err(FdtError::MissingRam);
                 }
-                dynamic.resolve(&mut layout)?;
-                return Ok(layout);
+                dynamic.resolve(layout)?;
+                return Ok(());
             }
             _ => return Err(FdtError::MalformedStructure),
         }
@@ -495,6 +551,7 @@ struct DynamicRequest<'a> {
     ranges: Option<&'a [u8]>,
     address_cells: u32,
     size_cells: u32,
+    no_map: bool,
 }
 
 struct DynamicRequests<'a> {
@@ -511,6 +568,7 @@ impl<'a> DynamicRequests<'a> {
                 ranges: None,
                 address_cells: 2,
                 size_cells: 1,
+                no_map: false,
             }; MAX_DYNAMIC_RESERVATIONS],
             len: 0,
         }
@@ -556,9 +614,11 @@ impl<'a> DynamicRequests<'a> {
                     break;
                 }
             }
-            layout
-                .reserved
-                .insert(chosen.ok_or(FdtError::DynamicReservationUnavailable)?)?;
+            let chosen = chosen.ok_or(FdtError::DynamicReservationUnavailable)?;
+            layout.reserved.insert(chosen)?;
+            if request.no_map {
+                layout.unmapped.insert(chosen)?;
+            }
         }
         Ok(())
     }
@@ -1001,6 +1061,205 @@ mod tests {
                 }
             ]
         );
+        assert_eq!(
+            layout.unmapped.as_slice(),
+            &[Region {
+                start: 0x4000,
+                end: 0x5000,
+            }]
+        );
+    }
+
+    #[test]
+    fn static_no_map_retains_all_reg_spans_but_not_other_reservations() {
+        let mut dtb = Dtb::new();
+        dtb.root(1, 1);
+        dtb.memory32(0, 0x20000);
+        dtb.reservations.push((0x6000, 0x1000));
+        dtb.reserved32();
+        dtb.begin("hidden");
+        dtb.cells("reg", &[0x4001, 0x1234, 0x8000, 0x2000]);
+        dtb.property("no-map", &[]);
+        dtb.end();
+        dtb.begin("ordinary");
+        dtb.cells("reg", &[0xA000, 0x1000]);
+        dtb.end();
+        dtb.end();
+        let layout = parse(&dtb.finish()).unwrap();
+        assert_eq!(
+            layout.unmapped.as_slice(),
+            &[
+                Region {
+                    start: 0x4001,
+                    end: 0x5235,
+                },
+                Region {
+                    start: 0x8000,
+                    end: 0xA000,
+                }
+            ]
+        );
+        assert_eq!(
+            layout.reserved.as_slice(),
+            &[
+                Region {
+                    start: 0x4001,
+                    end: 0x5235,
+                },
+                Region {
+                    start: 0x6000,
+                    end: 0x7000,
+                },
+                Region {
+                    start: 0x8000,
+                    end: 0xB000,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn dynamic_no_map_retains_only_the_selected_physical_span() {
+        let mut dtb = Dtb::new();
+        dtb.root(1, 1);
+        dtb.memory32(0, 0x20000);
+        dtb.reserved32();
+        dtb.begin("hidden");
+        dtb.cells("size", &[0x1234]);
+        dtb.cells("alloc-ranges", &[0x1000, 0xF000]);
+        dtb.property("no-map", &[]);
+        dtb.end();
+        dtb.end();
+        let initial = [Region {
+            start: 0x1000,
+            end: 0x4000,
+        }];
+        let layout = parse_with_reserved(&dtb.finish(), &initial).unwrap();
+        assert_eq!(
+            layout.unmapped.as_slice(),
+            &[Region {
+                start: 0x4000,
+                end: 0x5234,
+            }]
+        );
+        assert_eq!(
+            layout.reserved.as_slice(),
+            &[Region {
+                start: 0x1000,
+                end: 0x5234,
+            }]
+        );
+    }
+
+    #[test]
+    fn disabled_no_map_nodes_and_subtrees_contribute_no_spans() {
+        for dynamic in [false, true] {
+            for disabled_parent in [false, true] {
+                let mut dtb = Dtb::new();
+                dtb.root(1, 1);
+                dtb.memory32(0, 0x10000);
+                dtb.reserved32();
+                if disabled_parent {
+                    dtb.property("status", b"disabled\0");
+                }
+                dtb.begin("hidden");
+                if !disabled_parent {
+                    dtb.property("status", b"disabled\0");
+                }
+                if dynamic {
+                    dtb.cells("size", &[0x1000]);
+                } else {
+                    dtb.cells("reg", &[0x4000, 0x1000]);
+                }
+                dtb.property("no-map", &[]);
+                dtb.end();
+                dtb.end();
+                let layout = parse(&dtb.finish()).unwrap();
+                assert!(layout.reserved.as_slice().is_empty());
+                assert!(layout.unmapped.as_slice().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn no_map_dtb_truncation_and_byte_mutations_preserve_reservation_invariants() {
+        let mut dtb = Dtb::new();
+        dtb.root(1, 1);
+        dtb.memory32(0, 0x20000);
+        dtb.reserved32();
+        dtb.begin("fixed");
+        dtb.cells("reg", &[0x4001, 0x1234]);
+        dtb.property("no-map", &[]);
+        dtb.end();
+        dtb.begin("dynamic");
+        dtb.cells("size", &[0x2345]);
+        dtb.cells("alignment", &[0x1000]);
+        dtb.cells("alloc-ranges", &[0x1000, 0xF000]);
+        dtb.property("no-map", &[]);
+        dtb.end();
+        dtb.end();
+        let blob = dtb.finish();
+        for length in 0..blob.len() {
+            assert!(parse(&blob[..length]).is_err(), "accepted prefix {length}");
+        }
+        // Mutations may describe another valid DTB; any accepted no-map range
+        // must still have a reservation owner, and malformed input must not panic.
+        for index in 0..blob.len() {
+            for mask in [1, 0x80, 0xFF] {
+                let mut mutated = blob.clone();
+                mutated[index] ^= mask;
+                if let Ok(layout) = parse(&mutated) {
+                    for hole in layout.unmapped.as_slice() {
+                        assert!(layout.reserved.as_slice().iter().any(|reserved| {
+                            reserved.start <= hole.start && hole.end <= reserved.end
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_into_clears_previous_and_partially_parsed_maps_on_every_error() {
+        let mut output = MemoryLayout::new();
+        parse_into(&sample32(), &[], &mut output).unwrap();
+        assert!(!output.ram.as_slice().is_empty());
+
+        let mut dtb = Dtb::new();
+        dtb.root(1, 1);
+        dtb.memory32(0, 0x10000);
+        dtb.reserved32();
+        dtb.begin("hidden");
+        dtb.cells("reg", &[0x4000, 0x1000]);
+        dtb.property("no-map", &[]);
+        dtb.end();
+        dtb.end();
+        dtb.begin("chosen");
+        // RAM, reserved and unmapped have all been populated before this node
+        // fails. The parser must not expose any of those partial results.
+        dtb.cells("linux,initrd-start", &[0x6000]);
+        dtb.end();
+        assert_eq!(
+            parse_into(&dtb.finish(), &[], &mut output),
+            Err(FdtError::InvalidInitrd)
+        );
+        assert!(output.ram.as_slice().is_empty());
+        assert!(output.reserved.as_slice().is_empty());
+        assert!(output.unmapped.as_slice().is_empty());
+
+        parse_into(&sample32(), &[], &mut output).unwrap();
+        assert_eq!(parse_into(&[], &[], &mut output), Err(FdtError::Truncated));
+        assert!(output.ram.as_slice().is_empty());
+        assert!(output.reserved.as_slice().is_empty());
+        assert!(output.unmapped.as_slice().is_empty());
+
+        assert_eq!(
+            parse_into(&sample32(), &[Region { start: 2, end: 1 }], &mut output,),
+            Err(FdtError::Regions(RegionError::Empty))
+        );
+        assert!(output.ram.as_slice().is_empty());
+        assert!(output.reserved.as_slice().is_empty());
+        assert!(output.unmapped.as_slice().is_empty());
     }
 
     #[test]

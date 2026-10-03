@@ -51,18 +51,18 @@ impl From<PageError> for MemoryError {
 
 /// No LDXR/STXR spinlock: secondary cores remain parked and CPU0 masks IRQ/FIQ
 /// while accessing allocator state. This is deliberately not an SMP lock.
-struct Cpu0Cell<T>(UnsafeCell<T>);
+pub(super) struct Cpu0Cell<T>(UnsafeCell<T>);
 
 // SAFETY: used exclusively on CPU0. All accesses go through `with`; IRQ/FIQ
 // cannot preempt its closure. Allocator closures never call into the allocator.
 unsafe impl<T> Sync for Cpu0Cell<T> {}
 
 impl<T> Cpu0Cell<T> {
-    const fn new(value: T) -> Self {
+    pub(super) const fn new(value: T) -> Self {
         Self(UnsafeCell::new(value))
     }
 
-    fn with<R>(&self, function: impl FnOnce(&mut T) -> R) -> R {
+    pub(super) fn with<R>(&self, function: impl FnOnce(&mut T) -> R) -> R {
         let _guard = InterruptGuard::new();
         // SAFETY: the single active CPU and interrupt mask serialize this borrow.
         unsafe { function(&mut *self.0.get()) }
@@ -110,6 +110,10 @@ static PAGES: Cpu0Cell<PageState> = Cpu0Cell::new(PageState {
     ready: false,
     heap_pages: None,
 });
+
+// Keep the bounded DT result in BSS rather than copying several 6 KiB layouts
+// through debug Result return slots on the fixed 64 KiB boot stack.
+static BOOT_LAYOUT: Cpu0Cell<fdt::MemoryLayout> = Cpu0Cell::new(fdt::MemoryLayout::new());
 
 struct HeapState {
     heap: Heap,
@@ -205,27 +209,29 @@ pub unsafe fn init(
     }
     // SAFETY: full length was checked above; bootloader keeps this copy alive.
     let blob = unsafe { core::slice::from_raw_parts(dtb_address as *const u8, size) };
-    let layout = fdt::parse_with_reserved(blob, reserved.as_slice())?;
-    if !layout
-        .ram
-        .as_slice()
-        .iter()
-        .any(|ram| ram.start <= dtb_address && ram.end >= end)
-    {
-        return Err(MemoryError::InvalidDtbAddress);
-    }
-
-    crate::println!("[INFO] PHYSICAL MEMORY (4 KIB PAGES)");
-    for region in layout.ram.as_slice() {
-        crate::println!("RAM      : {:#018x}..{:#018x}", region.start, region.end);
-    }
-    for region in layout.reserved.as_slice() {
-        crate::println!("RESERVED : {:#018x}..{:#018x}", region.start, region.end);
-    }
-    PAGES.with(|state| {
-        state
-            .allocator
-            .init(layout.ram.as_slice(), layout.reserved.as_slice())
+    BOOT_LAYOUT.with(|layout| -> Result<(), MemoryError> {
+        fdt::parse_into(blob, reserved.as_slice(), layout)?;
+        if !layout
+            .ram
+            .as_slice()
+            .iter()
+            .any(|ram| ram.start <= dtb_address && ram.end >= end)
+        {
+            return Err(MemoryError::InvalidDtbAddress);
+        }
+        crate::println!("[INFO] PHYSICAL MEMORY (4 KIB PAGES)");
+        for region in layout.ram.as_slice() {
+            crate::println!("RAM      : {:#018x}..{:#018x}", region.start, region.end);
+        }
+        for region in layout.reserved.as_slice() {
+            crate::println!("RESERVED : {:#018x}..{:#018x}", region.start, region.end);
+        }
+        PAGES.with(|state| {
+            state
+                .allocator
+                .init(layout.ram.as_slice(), layout.reserved.as_slice())
+        })?;
+        Ok(())
     })?;
     page_self_test()?;
     crate::println!("[ OK ] PHYSICAL PAGE SELF-TEST");
@@ -253,6 +259,8 @@ pub unsafe fn init(
         return Err(error);
     }
     PAGES.with(|state| state.ready = true);
+    #[cfg(feature = "mmu")]
+    BOOT_LAYOUT.with(|layout| super::mmu::remember_layout(layout, framebuffer));
     crate::println!("[ OK ] KERNEL HEAP: {} BYTES", HEAP_SIZE);
     crate::println!("[ OK ] HEAP ALLOCATION/FREE SELF-TEST");
     Ok(page_stats())
@@ -326,7 +334,7 @@ fn page_self_test() -> Result<(), MemoryError> {
     Ok(())
 }
 
-fn heap_self_test() -> Result<(), MemoryError> {
+pub(super) fn heap_self_test() -> Result<(), MemoryError> {
     let before = heap_free_bytes();
     let layout = Layout::from_size_align(8193, PAGE_SIZE).map_err(|_| MemoryError::SelfTest)?;
     // Exercise the actual registered GlobalAlloc, including page alignment and

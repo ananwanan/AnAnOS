@@ -10,6 +10,7 @@ mod drivers;
 mod graphics;
 mod memory;
 mod test;
+mod userspace;
 
 use arch::timer::Timer;
 
@@ -23,7 +24,13 @@ use drivers::uart::MiniUart;
 use memory::regions::Region;
 
 global_asm!(include_str!("../../boot/boot.S"));
+#[cfg(not(feature = "userspace"))]
 global_asm!(include_str!("../../boot/vectors.S"));
+#[cfg(feature = "userspace")]
+global_asm!(
+    ".equ ANANOS_USERSPACE, 1",
+    include_str!("../../boot/vectors.S")
+);
 
 #[macro_export]
 macro_rules! print {
@@ -72,17 +79,39 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
     println!("DTB address : {dtb_address:#018x}");
     // Firmware/bootloader provides the readable DTB; memory init excludes all
     // firmware/kernel buffers before any page or heap allocation is possible.
-    match unsafe { memory::init(dtb_address, framebuffer_region) } {
+    let memory_ready = match unsafe { memory::init(dtb_address, framebuffer_region) } {
         Ok(stats) => {
             println!("[ OK ] PHYSICAL PAGE ALLOCATOR");
             println!("PAGES TOTAL   : {}", stats.total_pages);
             println!("PAGES RESERVED: {}", stats.reserved_pages);
             println!("PAGES USED    : {}", stats.allocated_pages);
             println!("PAGES FREE    : {}", stats.free_pages);
+            true
         }
         Err(error) => {
             println!("[FAIL] MEMORY INITIALIZATION: {error:?}");
             println!("[INFO] Continuing UART/IRQ diagnostics");
+            false
+        }
+    };
+
+    #[cfg(feature = "mmu")]
+    if memory_ready {
+        println!("[INFO] PREPARING EL1 IDENTITY MAP...");
+        match unsafe { memory::mmu::init() } {
+            Ok(()) => println!("[ OK ] MMU BRING-UP SELF-TEST"),
+            Err(error) => {
+                println!("[FAIL] MMU INITIALIZATION: {error:?}");
+                if arch::mmu::is_enabled() {
+                    println!("[FAIL] MMU IS ACTIVE; HALTING BEFORE IRQ ENABLE");
+                    loop {
+                        unsafe {
+                            asm!("wfe", options(nomem, nostack, preserves_flags));
+                        }
+                    }
+                }
+                println!("[INFO] MMU OFF; CONTINUING DEVICE DIAGNOSTICS");
+            }
         }
     }
 
@@ -159,6 +188,21 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
     }
 
     println!("IRQ ENABLE RETURNED");
+    #[cfg(feature = "userspace")]
+    if arch::mmu::is_enabled() {
+        match userspace::run_demos() {
+            Ok(()) => println!("[ OK ] MMU -> EL0 GATE A SELF-TEST"),
+            Err(error) => {
+                println!("[FAIL] USERSPACE SELF-TEST: {error:?}");
+                arch::exception::disable_irq();
+                loop {
+                    unsafe {
+                        asm!("wfe", options(nomem, nostack, preserves_flags));
+                    }
+                }
+            }
+        }
+    }
     println!("WAITING FOR TIMER INTERRUPT...");
 
     let mut previous_tick = 0;

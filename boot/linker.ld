@@ -5,8 +5,9 @@ SECTIONS
     . = 0x200000;
     __kernel_start = .;
 
-    .text : ALIGN(16)
+    .text : ALIGN(4096)
     {
+        __text_start = .;
         KEEP(*(.text.boot))
         
         . = ALIGN(2048);
@@ -15,37 +16,45 @@ SECTIONS
         __vectors_end = .;
         
         *(.text*)
+        . = ALIGN(4096);
+        __text_end = .;
     }
 
-    .rodata : ALIGN(16)
+    .rodata : ALIGN(4096)
     {
+        __rodata_start = .;
         *(.rodata*)
+        . = ALIGN(4096);
+        __rodata_end = .;
     }
 
-    .data : ALIGN(16)
+    .data : ALIGN(4096)
     {
+        __data_start = .;
         *(.data*)
+        . = ALIGN(4096);
+        __data_end = .;
     }
 
-    .bss (NOLOAD) : ALIGN(16)
+    .bss (NOLOAD) : ALIGN(4096)
     {
         __bss_start = .;
 
         *(.bss*)
         *(COMMON)
 
-        . = ALIGN(16);
+        . = ALIGN(4096);
         __bss_end = .;
     }
 
-    .stack (NOLOAD) : ALIGN(16)
+    .stack (NOLOAD) : ALIGN(4096)
     {
         __stack_bottom = .;
 
         /* 64 KiB 内核栈 */
         . += 64K;
 
-        . = ALIGN(16);
+        . = ALIGN(4096);
         __stack_top = .;
     }
 

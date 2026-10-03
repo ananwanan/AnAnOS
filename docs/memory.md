@@ -1,7 +1,8 @@
 # Physical memory and kernel heap bring-up
 
-This is the no-MMU, CPU0-only foundation milestone. Addresses are physical;
-MMU, caches, user address spaces and userspace allocators remain future work.
+This is the default no-MMU, CPU0-only foundation milestone. Addresses are physical.
+The opt-in [M2 MMU path](mmu.md) uses those same addresses through an identity map;
+caches, user address spaces and userspace allocators remain future work.
 
 ## Bootstrap sequence
 
@@ -42,6 +43,9 @@ must supply readable immutable storage for the entire declared DTB span.
 heap use. It supports v16 and v17-compatible DTBs, big-endian 1/2-cell address
 and size fields, multiple root memory nodes/banks, and skips disabled nodes.
 The actual boot path accepts a minimum 40-byte header, as used by Pi firmware.
+Kernel parsing uses `parse_into` with a static result buffer to avoid large
+RAM/reservation/no-map return-value copies on the fixed boot stack. Errors clear
+the output. The returning API remains available for host tests.
 Malformed offsets/tokens/strings, overflow, unsupported cell encodings or
 translated reserved-memory addresses stop discovery.
 Enabled memory/chosen nodes with `linux,usable-memory*` restrictions are rejected
@@ -121,7 +125,7 @@ All global allocator operations execute on CPU0 with IRQ/FIQ masked, then restor
 the saved DAIF state. No exclusive-load/store atomics are used. This is **not**
 SMP synchronization. Secondary cores must remain parked. IRQ handlers should
 stay allocation-free to bound latency; allocator internals never log or
-recursively allocate. Before enabling MMU/caches or SMP, revise this contract,
+recursively allocate. Before enabling caches or SMP, revise this contract,
 RAM/device attributes and mailbox/framebuffer coherency together.
 
 ## Validation and board check
@@ -161,6 +165,10 @@ Check UART output for relocated `DTB address`, actual `RAM` and `RESERVED` spans
 `HEAP ALLOCATION/FREE SELF-TEST`. The heap should account for 256 allocated pages.
 Check that the existing GIC state output and recurring timer ticks still appear.
 Framebuffer failure must still leave all diagnostics available over UART.
+
+The optional [M3 EL0 runner](userspace.md) holds private code/data/stack and table
+tokens, switches back to the kernel root with full TLBI, then reclaims them.
+The global page/heap counters must return to their prior values after each task.
 
 `test::test_exception_simd_context()` is an optional board BRK diagnostic after
 installing the EL1h vectors. It samples both 64-bit lanes of q0/q1/q31 and

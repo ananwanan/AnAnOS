@@ -19,7 +19,8 @@ AnanOS is a small bare-metal operating system written in Rust for the Raspberry 
 - Kernel style: `#![no_std]`, `#![no_main]`
 - Current execution model: CPU0 runs; secondary cores park in `wfe`
 - Current kernel runtime EL: EL1h
-- MMU: disabled
+- Optional `userspace` feature: private EL0t tasks with SVC entry and return to EL1h; see `docs/abi/README.md`
+- MMU: disabled in the default build; opt-in `mmu` feature enables an EL1 identity map
 - Data cache: disabled
 - Instruction cache: disabled
 
@@ -139,7 +140,7 @@ When modifying exception-level code, use explicit `dsb` / `isb` barriers where a
 
 ## Memory and MMIO rules
 
-The current kernel runs without an MMU, so addresses used by drivers are physical addresses.
+The default kernel runs without an MMU. The opt-in M2 path uses an EL1 identity map with caches disabled, so driver address values remain physical/identical virtual addresses. See `docs/mmu.md` for mapping permissions, `no-map` holes, table ownership and hardware validation requirements. Do not apply the offline page-table mutation API to active tables.
 
 Current important physical addresses include:
 

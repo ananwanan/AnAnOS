@@ -75,6 +75,12 @@ impl RegionSet {
     pub fn as_slice(&self) -> &[Region] {
         &self.regions[..self.len]
     }
+
+    /// Entries beyond `len` are never exposed or read by insertion, so clearing
+    /// needs no large temporary array or memory write during early boot.
+    pub fn clear(&mut self) {
+        self.len = 0;
+    }
 }
 
 impl Default for RegionSet {
@@ -136,5 +142,25 @@ mod tests {
             Err(RegionError::Empty)
         );
         assert!(regions.as_slice().is_empty());
+    }
+
+    #[test]
+    fn clear_hides_old_ranges_and_reuses_the_full_capacity() {
+        let mut regions = RegionSet::new();
+        for index in 0..MAX_REGIONS {
+            regions.insert(Region::new(index * 4, 2).unwrap()).unwrap();
+        }
+        regions.clear();
+        assert!(regions.as_slice().is_empty());
+        regions
+            .insert(Region::new(0x10000, 0x1000).unwrap())
+            .unwrap();
+        assert_eq!(
+            regions.as_slice(),
+            &[Region {
+                start: 0x10000,
+                end: 0x11000,
+            }]
+        );
     }
 }

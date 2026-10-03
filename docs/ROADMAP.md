@@ -46,5 +46,13 @@ HDMI、持续 timer IRQ、页清零/回收及可选 SIMD BRK 诊断仍须在板�
 4. 对真实硬件相关行为保留诊断，记录板上证据后才标记硬件通过。
 5. 同步能力状态和下一阶段入口，不把后续 libc/toolchain 策略塞进内核。
 
-M2 的入口是本阶段的物理页所有权 API。堆代码已实现，仍须完成 M1 板上验收；
-首次开启 MMU/cache 前先固定地址布局和 mailbox/DMA 一致性规则。
+M2 页表/MMU 基础代码已实现：可选 EL1 身份映射、4 KiB 页及大块映射、
+W^X、no-map 空洞、Normal NC/Device 属性、页表资源回收和启动自测。
+默认构建仍关闭 MMU；`-EnableMmu` 构建独立镜像，缓存继续关闭。
+地址布局、mailbox 一致性约束和手动上板步骤见 [mmu.md](mmu.md)，
+开发机验证见 [M2 记录](validation/M2.md)。M1/M2 板上验收仍未完成；
+M3 的 Gate A 基础代码也已实现：独立 TTBR0/用户页、EL0t、SVC write/exit、
+完整上下文返回、用户故障/栈保护页、EL0 timer 超时和资源回收。
+`-EnableUserspace` 构建单独镜像并隐式启用 MMU，详见 [userspace.md](userspace.md)
+和 [临时 ABI](abi/README.md)。实机 Gate A 验收仍待 UART 证据；
+调度器、ELF/VFS、活跃页表修改和缓存开启不属于这次实现。

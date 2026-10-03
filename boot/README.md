@@ -98,6 +98,15 @@ VideoCore/framebuffer 和 MMIO 排除后，再初始化物理页分配器和内�
 `__kernel_end` 包含 BSS 中的页位图与 64 KiB 栈。
 详见 [内存设计说明](../docs/memory.md)。
 
+## M2 可选 MMU 启动
+
+早期汇编仍保持 MMU/cache 关闭。链接器将 `.text`、`.rodata` 和可写区
+边界按 4 KiB 对齐，供 Rust 在完成物理内存/堆自测后建立身份映射；
+kernel 和 bootloader 的入口地址、DTB 传递以及 64 KiB 栈保持不变。
+只有 `mmu` feature 开启时 Rust 才尝试设置 SCTLR.M；C/I 继续关闭。
+映射和 CPU 条件检查失败会保留原诊断路径，激活后的自测失败则在 IRQ
+开启前停机并保留正在使用的页表。详见 [M2 说明](../docs/mmu.md)。
+
 ## Entry and exception context contract
 
 The kernel masks all DAIF exceptions immediately on entry, before setting up
@@ -115,8 +124,8 @@ protocol and is outside this physical-address boot path. Both paths establish
 the SCTLR RES1 bits, little-endian accesses, EL1h stack selection and
 `CPACR_EL1.FPEN = 0b11` before calling Rust.
 
-`boot/vectors.S` saves an 800-byte, 16-byte-aligned exception frame for the
-handled EL1h synchronous exceptions and IRQs:
+`boot/vectors.S` saves an 816-byte, 16-byte-aligned exception frame for handled
+EL1h synchronous exceptions/IRQs and optional lower-A64 EL0 exceptions:
 
 | Byte offset | Saved state |
 | --- | --- |
@@ -127,13 +136,19 @@ handled EL1h synchronous exceptions and IRQs:
 | 272..783 | Full 128-bit `q0` through `q31` |
 | 784 | `FPCR` in a 64-bit slot |
 | 792 | `FPSR` in a 64-bit slot |
+| 800 | `SP_EL0` |
+| 808 | `FAR_EL1` |
 
 The first 272 bytes remain the `#[repr(C)] ExceptionContext` exposed to Rust.
 The FP/SIMD extension is saved and restored by assembly. Normal AAPCS64 calls
 only preserve a subset of vector state; an exception can interrupt a live
 vector computation at any instruction, so the entry code preserves all of it.
 This covers Cortex-A72 FP/Advanced SIMD; it does not claim SVE/SME support.
-Lower-EL vectors remain unimplemented until the separate EL0 milestone.
+The optional `userspace` feature dispatches lower-A64 sync/IRQ exceptions to
+the EL0 syscall/fault handlers. Returning handlers restore this frame and ERET;
+terminating handlers discard it and resume the 256-byte saved kernel runner.
+See [M3 execution](../docs/userspace.md) for register initialization, private
+stack ownership, root switching and hardware acceptance.
 
 References:
 

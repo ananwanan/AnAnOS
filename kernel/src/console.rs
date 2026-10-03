@@ -110,6 +110,34 @@ pub fn _print(arguments: fmt::Arguments<'_>) {
     }
 }
 
+/// Byte-oriented early stdout/stderr. UART receives bytes (with the existing
+/// CR/LF convention); the ASCII framebuffer sink substitutes unsupported glyphs.
+pub fn write_bytes(bytes: &[u8]) {
+    fn uart_bytes(bytes: &[u8]) {
+        let uart = MiniUart::new();
+        for &byte in bytes {
+            if byte == b'\n' {
+                uart.write_byte(b'\r');
+            }
+            uart.write_byte(byte);
+        }
+    }
+    if CONSOLE
+        .with(|console| {
+            uart_bytes(bytes);
+            if let Some(screen) = console.screen.as_mut() {
+                for &byte in bytes {
+                    let character = if byte.is_ascii() { byte as char } else { '?' };
+                    let _ = screen.write_char(character);
+                }
+            }
+        })
+        .is_none()
+    {
+        uart_bytes(bytes);
+    }
+}
+
 pub fn set_screen_foreground(color: u32) {
     CONSOLE.with(|console| {
         console.set_screen_foreground(color);

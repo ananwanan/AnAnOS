@@ -10,7 +10,26 @@ extern crate std;
 pub mod fdt;
 #[path = "memory/heap.rs"]
 pub mod heap;
+#[path = "memory/mapping.rs"]
+pub mod mapping;
 #[path = "memory/page.rs"]
 pub mod page;
+#[path = "memory/paging.rs"]
+pub mod paging;
 #[path = "memory/regions.rs"]
 pub mod regions;
+
+// The binary and host tests use identical userspace permission/ABI algorithms.
+pub mod memory {
+    pub use crate::paging;
+}
+pub mod userspace {
+    pub mod abi;
+    pub mod space;
+    #[cfg(test)]
+    mod tests;
+}
+
+#[cfg(test)]
+#[path = "memory/mmu_tests.rs"]
+mod mmu_tests;

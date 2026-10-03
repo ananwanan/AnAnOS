@@ -13,7 +13,7 @@ pub struct ExceptionContext {
     pub esr_el1: u64,
 }
 
-// boot/vectors.S appends SIMD/FP state after this unchanged 272-byte prefix.
+// boot/vectors.S appends SIMD/FP and SP_EL0/FAR state after this 272-byte prefix.
 const _: () = assert!(core::mem::size_of::<ExceptionContext>() == 272);
 const _: () = assert!(core::mem::offset_of!(ExceptionContext, elr_el1) == 248);
 const _: () = assert!(core::mem::offset_of!(ExceptionContext, spsr_el1) == 256);

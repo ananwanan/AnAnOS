@@ -3,4 +3,11 @@ name = "kernel"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+# Opt-in identity translation bring-up; caches stay disabled.
+mmu = []
+# EL0 bring-up depends on translation and explicit permission isolation.
+userspace = ["mmu"]
+
 [dependencies]
