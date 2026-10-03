@@ -3,8 +3,9 @@
 The optional `userspace` feature includes `mmu` and completes the Gate A code
 path: private user mappings, real EL0t entry, SVC output, exit and return to the
 kernel, fault isolation, timer IRQ recovery and resource cleanup. Default and
-MMU-only images remain available. Caches, scheduler, ELF/VFS and hosted libc are
-separate future work. No hardware acceptance is claimed by this document.
+MMU-only images remain available. The separate `filesystem` feature extends
+this runner with processes, ELF and VFS (see [M4](filesystem.md)). Caches and
+hosted libc remain future work. No hardware acceptance is claimed here.
 
 Kernel code keeps its current physical identity addresses; EL0 occupies a
 disjoint 256 GiB-based window in each root. AP permissions isolate kernel pages

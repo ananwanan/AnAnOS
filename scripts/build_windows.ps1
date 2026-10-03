@@ -1,4 +1,4 @@
-param([switch]$EnableMmu, [switch]$EnableUserspace)
+param([switch]$EnableMmu, [switch]$EnableUserspace, [switch]$EnableFilesystem)
 
 $ErrorActionPreference = "Stop"
 
@@ -10,7 +10,10 @@ Push-Location (Split-Path -Parent $PSScriptRoot)
 try {
     $taskBuildArguments = @("build", "-p", "kernel")
     $taskImagePath = "target/kernel8.img"
-    if ($EnableUserspace) {
+    if ($EnableFilesystem) {
+        $taskBuildArguments += @("--features", "filesystem")
+        $taskImagePath = "target/kernel8-fs.img"
+    } elseif ($EnableUserspace) {
         $taskBuildArguments += @("--features", "userspace")
         $taskImagePath = "target/kernel8-el0.img"
     } elseif ($EnableMmu) {

@@ -23,12 +23,23 @@ pub enum TrapError {
     NotSvc,
 }
 
-/// The current kernel primitives exposed to the provisional syscall ABI.
-/// `write` is called after stdout/stderr descriptor and length validation;
-/// the service must validate user memory before accessing any bytes.
+/// Kernel primitives exposed to the provisional syscall ABI. The descriptor
+/// preflight precedes length validation; each service validates complete user
+/// memory before accessing bytes or changing filesystem state. M3 defaults to
+/// console descriptors; M4 supplies the current process's FD and file services.
 pub trait Services {
-    fn write(&mut self, address: u64, length: usize) -> Result<u64, Errno>;
+    fn validate_write(&self, fd: u64) -> Result<(), Errno> {
+        if fd == abi::STDOUT || fd == abi::STDERR {
+            Ok(())
+        } else {
+            Err(Errno::BadFileDescriptor)
+        }
+    }
+    fn write(&mut self, fd: u64, address: u64, length: usize) -> Result<u64, Errno>;
     fn yield_now(&mut self);
+    fn call(&mut self, _number: u64, _arguments: [u64; 6]) -> Result<u64, Errno> {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// Handle an AArch64 EL0 `svc`. Returning calls change only x0; ELR already
@@ -50,6 +61,12 @@ pub fn dispatch(
         return Ok(Action::Resume);
     }
     let registers = &mut context.registers;
+    if registers[8] == abi::SYS_WRITE {
+        if let Err(error) = services.validate_write(registers[0]) {
+            registers[0] = error.result();
+            return Ok(Action::Resume);
+        }
+    }
     let request = abi::decode_syscall(
         registers[8],
         [
@@ -63,13 +80,16 @@ pub fn dispatch(
     );
     let result = match request {
         Ok(SyscallRequest::Write {
-            address, length, ..
-        }) => services.write(address, length),
+            fd,
+            address,
+            length,
+        }) => services.write(fd, address, length),
         Ok(SyscallRequest::Exit { status }) => return Ok(Action::Exit(status)),
         Ok(SyscallRequest::Yield) => {
             services.yield_now();
             Ok(0)
         }
+        Ok(SyscallRequest::Extension { number, arguments }) => services.call(number, arguments),
         Err(error) => Err(error),
     };
     registers[0] = result.unwrap_or_else(Errno::result);
@@ -132,7 +152,7 @@ mod tests {
         write_error: Option<Errno>,
     }
     impl Services for Model {
-        fn write(&mut self, address: u64, length: usize) -> Result<u64, Errno> {
+        fn write(&mut self, _fd: u64, address: u64, length: usize) -> Result<u64, Errno> {
             self.writes.push((address, length));
             self.write_error.map_or(Ok(length as u64), Err)
         }

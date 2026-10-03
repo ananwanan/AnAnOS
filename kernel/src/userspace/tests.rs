@@ -366,7 +366,7 @@ struct ConsoleServices<'a> {
 }
 
 impl Services for ConsoleServices<'_> {
-    fn write(&mut self, address: u64, length: usize) -> Result<u64, Errno> {
+    fn write(&mut self, _fd: u64, address: u64, length: usize) -> Result<u64, Errno> {
         let store = self.store;
         syscall::write_user_buffer(
             &self.task.tables,

@@ -7,6 +7,8 @@ extern crate alloc;
 mod arch;
 mod console;
 mod drivers;
+#[cfg(feature = "filesystem")]
+mod fs;
 mod graphics;
 mod memory;
 mod test;
@@ -201,6 +203,13 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
                     }
                 }
             }
+        }
+    }
+    #[cfg(feature = "filesystem")]
+    if arch::mmu::is_enabled() {
+        match userspace::run_filesystem_demo() {
+            Ok(()) => println!("[ OK ] SYSCALL -> FILESYSTEM M4 SELF-TEST"),
+            Err(error) => println!("[FAIL] FILESYSTEM/PROCESS SELF-TEST: {error:?}"),
         }
     }
     println!("WAITING FOR TIMER INTERRUPT...");

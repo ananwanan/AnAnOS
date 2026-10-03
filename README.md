@@ -22,6 +22,13 @@ Implementation milestones and acceptance gates are tracked in
 `.\scripts\check_windows.ps1` for host logic tests, workspace checks and both
 boot images; this does not deploy to a board or prove hardware behavior.
 
+The optional [syscall -> filesystem milestone](docs/filesystem.md) loads static
+AArch64 ELF processes from an embedded USTAR initramfs, supports spawn/exec/wait,
+private descriptor tables and a writable RAM filesystem. Build `kernel8-fs.img`
+with `build_windows.ps1 -EnableFilesystem`; it includes the earlier EL0 checks.
+Its ABI and bounded resource limits are documented; persistent storage and libc
+remain future work. See [M4 validation](docs/validation/M4.md) for evidence.
+
 Current Target:
 
 - Raspberry Pi 4B
