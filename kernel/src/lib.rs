@@ -20,12 +20,18 @@ pub mod paging;
 pub mod regions;
 
 // The binary and host tests use identical userspace permission/ABI algorithms.
+pub mod arch {
+    pub mod context;
+}
 pub mod memory {
     pub use crate::paging;
 }
 pub mod userspace {
     pub mod abi;
+    pub mod fault;
+    pub mod preflight;
     pub mod space;
+    pub mod syscall;
     #[cfg(test)]
     mod tests;
 }

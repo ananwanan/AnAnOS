@@ -159,9 +159,22 @@ arch_user_return:
  */
 .section .rodata.user, "a"
 .align 4
-.equ USER_SYS_WRITE, 1
-.equ USER_SYS_EXIT,  2
-.equ USER_SYS_YIELD, 3
+/* Supplied by Rust global_asm! from the single provisional ABI definition. */
+.equ USER_SYS_WRITE,       {sys_write}
+.equ USER_SYS_EXIT,        {sys_exit}
+.equ USER_SYS_YIELD,       {sys_yield}
+.equ USER_STDOUT,          {stdout}
+.equ USER_STDERR,          {stderr}
+.equ USER_MAX_WRITE_BYTES, {max_write_bytes}
+.equ USER_SVC_IMMEDIATE,   {svc_immediate}
+.equ USER_EBADF,           {errno_ebadf}
+.equ USER_EFAULT,          {errno_efault}
+.equ USER_EINVAL,          {errno_einval}
+.equ USER_ENOSYS,          {errno_enosys}
+
+/* Defined AArch64 FP bits: round toward +inf and cumulative inexact flag. */
+.equ USER_FPCR, 0x00400000
+.equ USER_FPSR, 0x10
 
 .global __user_image_start
 .global __user_image_end
@@ -183,15 +196,22 @@ __user_image_start:
     /* Exercise a real private stack rather than relying only on registers. */
     sub sp, sp, #16
     stp x19, x20, [sp]
+    mov x9, #0x999
+    mov x18, #0x1818
     mov x19, #0x123
     mov x20, sp
+    mov x29, #0x2929
     movi v0.16b, #0x5a
     movi v31.16b, #0xa5
+    mov x4, #USER_FPCR
+    msr fpcr, x4
+    mov x4, #USER_FPSR
+    msr fpsr, x4
     adr x1, .Luser_message
     mov x2, #(.Luser_message_end - .Luser_message)
-    mov x0, #1
+    mov x0, #USER_STDOUT
     mov x8, #USER_SYS_WRITE
-    svc #0
+    svc #USER_SVC_IMMEDIATE
     cmp x0, #(.Luser_message_end - .Luser_message)
     b.ne .Luser_failed
     bl .Lverify_user_state
@@ -199,34 +219,111 @@ __user_image_start:
     /* The syscall must reject an EL1-only pointer without reading it. */
     mov x1, #0x200000
     mov x2, #1
-    mov x0, #1
+    mov x0, #USER_STDOUT
     mov x8, #USER_SYS_WRITE
-    svc #0
-    cmn x0, #14
+    svc #USER_SVC_IMMEDIATE
+    cmn x0, #USER_EFAULT
+    b.ne .Luser_failed
+    bl .Lverify_user_state
+
+    /* fd validation precedes the zero-length shortcut, even for fd 0. */
+    mov x0, #0
+    mov x1, #-1
+    mov x2, #0
+    mov x8, #USER_SYS_WRITE
+    svc #USER_SVC_IMMEDIATE
+    cmn x0, #USER_EBADF
+    b.ne .Luser_failed
+    bl .Lverify_user_state
+
+    /* Oversized writes must fail before looking at the invalid pointer. */
+    mov x0, #USER_STDOUT
+    mov x1, #-1
+    mov x2, #(USER_MAX_WRITE_BYTES + 1)
+    mov x8, #USER_SYS_WRITE
+    svc #USER_SVC_IMMEDIATE
+    cmn x0, #USER_EINVAL
+    b.ne .Luser_failed
+    bl .Lverify_user_state
+
+    /* An unsupported SVC immediate must not dispatch the EXIT number. */
+    mov x0, #0
+    mov x8, #USER_SYS_EXIT
+    svc #(USER_SVC_IMMEDIATE + 1)
+    cmn x0, #USER_EINVAL
+    b.ne .Luser_failed
+    bl .Lverify_user_state
+
+    /* A valid zero-byte write must not dereference this invalid pointer. */
+    mov x0, #USER_STDOUT
+    mov x1, #-1
+    mov x2, #0
+    mov x8, #USER_SYS_WRITE
+    svc #USER_SVC_IMMEDIATE
+    cbnz x0, .Luser_failed
+    bl .Lverify_user_state
+
+    /* address + length overflows u64; no byte may be read or emitted. */
+    mov x0, #USER_STDOUT
+    mov x1, #-2
+    mov x2, #4
+    mov x8, #USER_SYS_WRITE
+    svc #USER_SVC_IMMEDIATE
+    cmn x0, #USER_EFAULT
+    b.ne .Luser_failed
+    bl .Lverify_user_state
+
+    /* x20 = initial stack top - 16; only the first two bytes are mapped. */
+    mov x0, #USER_STDOUT
+    add x1, x20, #14
+    mov x2, #4
+    mov x8, #USER_SYS_WRITE
+    svc #USER_SVC_IMMEDIATE
+    cmn x0, #USER_EFAULT
+    b.ne .Luser_failed
+    bl .Lverify_user_state
+
+    /* Write seven bytes spanning the final two private stack pages. The
+     * start is initial stack top - 4099, three bytes below their boundary.
+     * Byte stores avoid requiring unaligned multi-byte data accesses. */
+    sub x1, x20, #4083
+    adr x6, .Luser_stack_message
+    mov x7, x1
+    mov x5, #(.Luser_stack_message_end - .Luser_stack_message)
+.Lcopy_stack_message:
+    ldrb w4, [x6], #1
+    strb w4, [x7], #1
+    subs x5, x5, #1
+    b.ne .Lcopy_stack_message
+    mov x0, #USER_STDERR
+    mov x2, #(.Luser_stack_message_end - .Luser_stack_message)
+    mov x8, #USER_SYS_WRITE
+    svc #USER_SVC_IMMEDIATE
+    cmp x0, #(.Luser_stack_message_end - .Luser_stack_message)
     b.ne .Luser_failed
     bl .Lverify_user_state
 
     mov x8, #0xffff
-    svc #0
-    cmn x0, #38
+    svc #USER_SVC_IMMEDIATE
+    cmn x0, #USER_ENOSYS
     b.ne .Luser_failed
     bl .Lverify_user_state
 
     mov x8, #USER_SYS_YIELD
-    svc #0
+    svc #USER_SVC_IMMEDIATE
     cbnz x0, .Luser_failed
     bl .Lverify_user_state
     ldp x19, x20, [sp]
     add sp, sp, #16
     mov x0, #0
     mov x8, #USER_SYS_EXIT
-    svc #0
+    svc #USER_SVC_IMMEDIATE
 .Luser_finished:
     b .Luser_finished
 .Luser_failed:
     mov x0, #1
     mov x8, #USER_SYS_EXIT
-    svc #0
+    svc #USER_SVC_IMMEDIATE
     b .Luser_finished
 
 .Lverify_user_state:
@@ -234,7 +331,15 @@ __user_image_start:
     mov x4, sp
     cmp x4, x20
     b.ne .Luser_failed
+    cmp x9, #0x999
+    b.ne .Luser_failed
+    mov x4, #0x1818
+    cmp x18, x4
+    b.ne .Luser_failed
     cmp x19, #0x123
+    b.ne .Luser_failed
+    mov x4, #0x2929
+    cmp x29, x4
     b.ne .Luser_failed
     ldr x4, .Luser_simd0
     umov x5, v0.d[0]
@@ -251,9 +356,12 @@ __user_image_start:
     cmp x4, x5
     b.ne .Luser_failed
     mrs x4, fpcr
-    cbnz x4, .Luser_failed
+    mov x5, #USER_FPCR
+    cmp x4, x5
+    b.ne .Luser_failed
     mrs x4, fpsr
-    cbnz x4, .Luser_failed
+    cmp x4, #USER_FPSR
+    b.ne .Luser_failed
     ret
 
 .align 3
@@ -264,6 +372,9 @@ __user_image_start:
 .Luser_message:
     .ascii "[EL0] hello through SVC\n"
 .Luser_message_end:
+.Luser_stack_message:
+    .ascii "stack!\n"
+.Luser_stack_message_end:
 .align 2
 __user_image_end:
 .size __user_image_start, __user_image_end - __user_image_start
@@ -271,11 +382,13 @@ __user_image_end:
 .align 4
 .global __user_fault_start
 .global __user_fault_end
+.global __user_fault_pc
 __user_fault_start:
+__user_fault_pc:
     ldr x1, [x0]
     mov x0, #1
     mov x8, #USER_SYS_EXIT
-    svc #0
+    svc #USER_SVC_IMMEDIATE
 .Lkernel_fault_unexpected:
     b .Lkernel_fault_unexpected
 __user_fault_end:
@@ -284,12 +397,14 @@ __user_fault_end:
 .align 4
 .global __user_readonly_start
 .global __user_readonly_end
+.global __user_readonly_pc
 __user_readonly_start:
     adr x0, __user_readonly_start
+__user_readonly_pc:
     str xzr, [x0]
     mov x0, #1
     mov x8, #USER_SYS_EXIT
-    svc #0
+    svc #USER_SVC_IMMEDIATE
 .Lreadonly_fault_unexpected:
     b .Lreadonly_fault_unexpected
 __user_readonly_end:
@@ -298,14 +413,16 @@ __user_readonly_end:
 .align 4
 .global __user_guard_start
 .global __user_guard_end
+.global __user_guard_pc
 __user_guard_start:
     /* Bring-up ABI: a 16 KiB stack with the preceding page left unmapped. */
     sub x0, sp, #4, lsl #12
     sub x0, x0, #8
+__user_guard_pc:
     str xzr, [x0]
     mov x0, #1
     mov x8, #USER_SYS_EXIT
-    svc #0
+    svc #USER_SVC_IMMEDIATE
 .Lguard_fault_unexpected:
     b .Lguard_fault_unexpected
 __user_guard_end:

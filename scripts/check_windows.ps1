@@ -52,9 +52,41 @@ function Test-AnanImage {
             $taskStart = $taskNm | Select-String "^([0-9a-fA-F]+)\s+\w\s+__user_$($taskStem)_start$"
             $taskEnd = $taskNm | Select-String "^([0-9a-fA-F]+)\s+\w\s+__user_$($taskStem)_end$"
             if (-not $taskStart -or -not $taskEnd) { throw "Missing EL0 $taskStem image bounds." }
-            $taskLength = [Convert]::ToUInt64($taskEnd.Matches[0].Groups[1].Value, 16) -
-                          [Convert]::ToUInt64($taskStart.Matches[0].Groups[1].Value, 16)
-            if ($taskLength -le 0 -or $taskLength -gt 4096) { throw "EL0 image must fit in one page." }
+            $taskStartAddress = [Convert]::ToUInt64($taskStart.Matches[0].Groups[1].Value, 16)
+            $taskEndAddress = [Convert]::ToUInt64($taskEnd.Matches[0].Groups[1].Value, 16)
+            if ($taskEndAddress -le $taskStartAddress -or $taskEndAddress - $taskStartAddress -gt 4096) {
+                throw "EL0 $taskStem image must fit in one page."
+            }
+            if ($taskStartAddress % 4 -ne 0 -or $taskEndAddress % 4 -ne 0 -or
+                $taskStartAddress -lt $taskSymbolAddresses["__rodata_start"] -or
+                $taskEndAddress -gt $taskSymbolAddresses["__rodata_end"]) {
+                throw "EL0 $taskStem image must be instruction-aligned immutable rodata."
+            }
+            $taskSymbolAddresses["__user_$($taskStem)_start"] = $taskStartAddress
+            $taskSymbolAddresses["__user_$($taskStem)_end"] = $taskEndAddress
+        }
+        foreach ($taskFault in @(
+            @{ Stem = "fault"; Opcode = "f9400001"; Instruction = 'ldr\s+x1,\s*\[x0\]' },
+            @{ Stem = "readonly"; Opcode = "f900001f"; Instruction = 'str\s+xzr,\s*\[x0\]' },
+            @{ Stem = "guard"; Opcode = "f900001f"; Instruction = 'str\s+xzr,\s*\[x0\]' }
+        )) {
+            $taskStem = $taskFault.Stem
+            $taskPc = $taskNm | Select-String "^([0-9a-fA-F]+)\s+\w\s+__user_$($taskStem)_pc$"
+            if (-not $taskPc) { throw "Missing EL0 $taskStem fault instruction label." }
+            $taskPcAddress = [Convert]::ToUInt64($taskPc.Matches[0].Groups[1].Value, 16)
+            if ($taskPcAddress % 4 -ne 0 -or
+                $taskPcAddress -lt $taskSymbolAddresses["__user_$($taskStem)_start"] -or
+                $taskPcAddress + 4 -gt $taskSymbolAddresses["__user_$($taskStem)_end"]) {
+                throw "EL0 $taskStem fault instruction must be aligned and inside its image."
+            }
+            # The copied EL0 images are stored as data: -D also disassembles .rodata.
+            $taskFaultInstruction = rust-objdump -D `
+                "--start-address=0x$($taskPcAddress.ToString('x'))" `
+                "--stop-address=0x$(($taskPcAddress + 4).ToString('x'))" $taskElfPath
+            if ($LASTEXITCODE -ne 0 -or -not ($taskFaultInstruction | Select-String `
+                "^\s*$($taskPcAddress.ToString('x')):\s+$($taskFault.Opcode)\s+$($taskFault.Instruction)\s*$")) {
+                throw "EL0 $taskStem fault label does not identify its expected AArch64 access instruction."
+            }
         }
     } elseif ($taskUserEntry) {
         throw "EL0 runner must only be linked into the userspace feature image."
@@ -83,6 +115,6 @@ try {
     Test-AnanImage -Elf bootloader -Image bootloader8.img -Entry 0x80000
     git diff --check
     if ($LASTEXITCODE -ne 0) { throw "Diff whitespace check failed." }
-    Write-Host "Host tests, all image variants, vectors and layout checks passed. Hardware is unverified."
+    Write-Host "Host tests, all image variants, vectors, layout and fault instruction checks passed. Hardware is unverified."
 }
 finally { Pop-Location }

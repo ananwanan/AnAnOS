@@ -2,12 +2,15 @@
 //! The CPU model walks raw descriptors independently of `PageTables::lookup`.
 //! No host process dereferences a simulated physical or virtual address.
 
-use super::abi::{self, Errno, SyscallRequest};
+use super::abi::{self, Errno};
 use super::space::{self, UserAccess};
+use super::syscall::{self, Action, Services};
+use crate::arch::context::ExceptionContext;
 use crate::page::{PAGE_SIZE, PageAllocator, PageError, PhysicalPages};
 use crate::paging::{MappingAttrs, MemoryType, PageTables, PagingError, TableMemory};
 use crate::regions::Region;
 use std::boxed::Box;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::vec::Vec;
 
@@ -34,6 +37,8 @@ struct Store {
     tables: BTreeMap<u64, HostTable>,
     data: BTreeMap<u64, HostData>,
     allocation_limit: usize,
+    syscall_reads: Cell<usize>,
+    largest_syscall_read: Cell<usize>,
 }
 
 impl Store {
@@ -53,6 +58,8 @@ impl Store {
             tables: BTreeMap::new(),
             data: BTreeMap::new(),
             allocation_limit: POOL_PAGES,
+            syscall_reads: Cell::new(0),
+            largest_syscall_read: Cell::new(0),
         }
     }
 
@@ -352,31 +359,36 @@ fn cpu_translate(
     Err(CpuFault::Translation)
 }
 
-fn check_copy(
-    task: &Task,
-    store: &Store,
-    address: u64,
-    length: usize,
-    access: UserAccess,
-) -> Result<(), Errno> {
-    space::validate_user_range(&task.tables, store, address, length, access)
-        .map_err(|_| Errno::Fault)?;
-    let mut offset = 0;
-    while offset < length {
-        let chunk = space::user_chunk(
-            &task.tables,
+struct ConsoleServices<'a> {
+    task: &'a Task,
+    store: &'a Store,
+    output: &'a mut Vec<u8>,
+}
+
+impl Services for ConsoleServices<'_> {
+    fn write(&mut self, address: u64, length: usize) -> Result<u64, Errno> {
+        let store = self.store;
+        syscall::write_user_buffer(
+            &self.task.tables,
             store,
-            address + offset as u64,
-            length - offset,
-            access,
+            address,
+            length,
+            |physical, bytes| self.task.owns(store, physical, bytes),
+            |chunk, buffer| {
+                assert_eq!(buffer.len(), chunk.length);
+                store.syscall_reads.set(store.syscall_reads.get() + 1);
+                store
+                    .largest_syscall_read
+                    .set(store.largest_syscall_read.get().max(chunk.length));
+                buffer.copy_from_slice(store.bytes(chunk.physical_address, chunk.length));
+            },
+            |bytes| self.output.extend_from_slice(bytes),
         )
-        .map_err(|_| Errno::Fault)?;
-        if !task.owns(store, chunk.physical_address, chunk.length) {
-            return Err(Errno::Fault);
-        }
-        offset += chunk.length;
     }
-    Ok(())
+
+    fn yield_now(&mut self) {
+        panic!("console write must not yield");
+    }
 }
 
 fn write_to_console(
@@ -386,32 +398,52 @@ fn write_to_console(
     length: u64,
     output: &mut Vec<u8>,
 ) -> Result<usize, Errno> {
-    let request = abi::decode_syscall(abi::SYS_WRITE, [abi::STDOUT, address, length, 0, 0, 0])?;
-    let SyscallRequest::Write { length, .. } = request else {
-        unreachable!()
+    let mut context = ExceptionContext {
+        registers: [0; 31],
+        elr_el1: space::USER_CODE + 4,
+        spsr_el1: 0,
+        esr_el1: (0x15 << 26) | (1 << 25) | abi::SVC_IMMEDIATE as u64,
     };
-    if length == 0 {
-        return Ok(0);
+    context.registers[0] = abi::STDOUT;
+    context.registers[1] = address;
+    context.registers[2] = length;
+    context.registers[8] = abi::SYS_WRITE;
+    assert_eq!(
+        syscall::dispatch(
+            &mut context,
+            &mut ConsoleServices {
+                task,
+                store,
+                output,
+            },
+        ),
+        Ok(Action::Resume)
+    );
+    let result = context.registers[0];
+    if result as i64 >= 0 {
+        return Ok(result as usize);
     }
-    check_copy(task, store, address, length, UserAccess::Read)?;
-    let mut offset = 0;
-    while offset < length {
-        let chunk = space::user_chunk(
-            &task.tables,
-            store,
-            address + offset as u64,
-            length - offset,
-            UserAccess::Read,
-        )
-        .unwrap();
-        output.extend_from_slice(store.bytes(chunk.physical_address, chunk.length));
-        offset += chunk.length;
-    }
-    Ok(length)
+    Err([
+        Errno::BadFileDescriptor,
+        Errno::Fault,
+        Errno::InvalidArgument,
+        Errno::NotImplemented,
+    ]
+    .into_iter()
+    .find(|error| error.result() == result)
+    .expect("syscall returned a known errno"))
 }
 
 fn copy_to_user(task: &Task, store: &mut Store, address: u64, bytes: &[u8]) -> Result<(), Errno> {
-    check_copy(task, store, address, bytes.len(), UserAccess::Write)?;
+    space::validate_owned_user_range(
+        &task.tables,
+        store,
+        address,
+        bytes.len(),
+        UserAccess::Write,
+        |physical, length| task.owns(store, physical, length),
+    )
+    .map_err(|_| Errno::Fault)?;
     let mut offset = 0;
     while offset < bytes.len() {
         let chunk = space::user_chunk(
@@ -540,6 +572,7 @@ fn full_copy_validation_precedes_console_output_and_user_memory_changes() {
     );
     assert_eq!(output, b"copy-ok");
     let before = output.clone();
+    let reads_before = store.syscall_reads.get();
     for (address, length) in [
         (KERNEL_TEXT, 1),
         (UART, 1),
@@ -553,6 +586,7 @@ fn full_copy_validation_precedes_console_output_and_user_memory_changes() {
             Err(Errno::Fault)
         );
         assert_eq!(output, before);
+        assert_eq!(store.syscall_reads.get(), reads_before);
     }
     assert_eq!(
         write_to_console(&task, &store, address, 4097, &mut output),
@@ -560,6 +594,7 @@ fn full_copy_validation_precedes_console_output_and_user_memory_changes() {
     );
     assert_eq!(write_to_console(&task, &store, 0, 0, &mut output), Ok(0));
     assert_eq!(output, before);
+    assert_eq!(store.syscall_reads.get(), reads_before);
     let stack_tail = task.stack + space::USER_STACK_PAGES * PAGE_SIZE as u64 - 2;
     let tail_before = store.bytes(stack_tail, 2).to_vec();
     assert_eq!(
@@ -573,6 +608,53 @@ fn full_copy_validation_precedes_console_output_and_user_memory_changes() {
         Err(Errno::Fault)
     );
     assert_eq!(store.bytes(task.code, 4), code_before);
+    task.reclaim(&mut store);
+    store.assert_empty();
+}
+
+#[test]
+fn syscall_write_copies_discontiguous_pages_in_bounded_chunks() {
+    let mut store = Store::new();
+    let task = Task::create(&mut store).unwrap();
+    let address = space::USER_DATA + PAGE_SIZE as u64 - 129;
+    let bytes: Vec<u8> = (0..300).map(|index| (index % 251) as u8).collect();
+    copy_to_user(&task, &mut store, address, &bytes).unwrap();
+    let mut output = Vec::new();
+    assert_eq!(
+        write_to_console(&task, &store, address, bytes.len() as u64, &mut output),
+        Ok(bytes.len())
+    );
+    assert_eq!(output, bytes);
+    assert_eq!(store.syscall_reads.get(), 4);
+    assert_eq!(store.largest_syscall_read.get(), 128);
+
+    // The largest accepted write starts partway through one page and ends in
+    // its discontiguous successor. Exercise the real 4096-byte boundary, then
+    // prove one extra byte is rejected before any physical read or output.
+    let address = space::USER_DATA + 1;
+    let bytes: Vec<u8> = (0..abi::MAX_WRITE_BYTES)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    copy_to_user(&task, &mut store, address, &bytes).unwrap();
+    output.clear();
+    assert_eq!(
+        write_to_console(&task, &store, address, bytes.len() as u64, &mut output),
+        Ok(abi::MAX_WRITE_BYTES)
+    );
+    assert_eq!(output, bytes);
+    let reads = store.syscall_reads.get();
+    assert_eq!(
+        write_to_console(
+            &task,
+            &store,
+            address,
+            (bytes.len() + 1) as u64,
+            &mut output
+        ),
+        Err(Errno::InvalidArgument)
+    );
+    assert_eq!(store.syscall_reads.get(), reads);
+    assert_eq!(output, bytes);
     task.reclaim(&mut store);
     store.assert_empty();
 }
@@ -621,6 +703,17 @@ fn switching_private_roots_reuses_user_virtual_addresses_without_sharing_pages()
         .tables
         .map_user_range(
             &mut store,
+            foreign_alias - PAGE_SIZE as u64,
+            first.first_data,
+            PAGE_SIZE as u64,
+            true,
+            false,
+        )
+        .unwrap();
+    first
+        .tables
+        .map_user_range(
+            &mut store,
             foreign_alias,
             second.first_data,
             PAGE_SIZE as u64,
@@ -631,14 +724,43 @@ fn switching_private_roots_reuses_user_virtual_addresses_without_sharing_pages()
     space::validate_user_range(&first.tables, &store, foreign_alias, 5, UserAccess::Read).unwrap();
     let mut output = Vec::new();
     assert_eq!(
+        space::validate_owned_user_range(
+            &first.tables,
+            &store,
+            foreign_alias,
+            5,
+            UserAccess::Read,
+            |physical, length| first.owns(&store, physical, length),
+        ),
+        Err(space::UserCopyError::NotOwned)
+    );
+    assert_eq!(
         write_to_console(&first, &store, foreign_alias, 5, &mut output),
         Err(Errno::Fault)
     );
     assert!(output.is_empty());
+    assert_eq!(store.syscall_reads.get(), 0);
     assert_eq!(
         copy_to_user(&first, &mut store, foreign_alias, b"wrong"),
         Err(Errno::Fault)
     );
+    assert_eq!(store.bytes(second.first_data, 5), b"other");
+    // Validate the entire request before even reading the valid first page;
+    // a foreign second page must leave both console and first-page bytes alone.
+    let crossing_address = foreign_alias - 2;
+    let owned_tail = first.first_data + PAGE_SIZE as u64 - 2;
+    let tail_before = store.bytes(owned_tail, 2).to_vec();
+    assert_eq!(
+        write_to_console(&first, &store, crossing_address, 4, &mut output),
+        Err(Errno::Fault)
+    );
+    assert!(output.is_empty());
+    assert_eq!(store.syscall_reads.get(), 0);
+    assert_eq!(
+        copy_to_user(&first, &mut store, crossing_address, b"fail"),
+        Err(Errno::Fault)
+    );
+    assert_eq!(store.bytes(owned_tail, 2), tail_before);
     assert_eq!(store.bytes(second.first_data, 5), b"other");
     // The hardware implementation must flush before reclaim. This host model
     // has no TLB; explicitly restore the kernel root before releasing a task.

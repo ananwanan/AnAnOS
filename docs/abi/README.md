@@ -38,6 +38,9 @@ cache maintenance or reprogram the physical timer to defeat its time budget.
 Instruction `svc #0`; x8 holds the number, x0..x5 arguments, x0 the result.
 Results are signed i64 encoded in a u64 register; success is nonnegative and
 failure `-errno`. SVC exception ELR already points to the next instruction.
+Returning calls preserve x1..x30, SP_EL0, PSTATE, all SIMD registers and
+FPCR/FPSR; only x0 is replaced. An exit call has no user return. SVC dispatch
+accepts AArch64 EL0t origins only; EL1 exceptions keep their existing handlers.
 
 | Number | Call | Arguments | Result |
 | ---: | --- | --- | --- |
@@ -58,6 +61,19 @@ Errors: EBADF=9, EFAULT=14, EINVAL=22, ENOSYS=38. Unknown numbers return ENOSYS;
 unsupported SVC immediates return EINVAL. `yield` is a hint and is not a scheduler
 or thread API. Current tasks are run sequentially by the kernel.
 
+Validation order is SVC immediate, syscall number, descriptor, length, then
+user range/permissions/physical ownership. For example, `write(0, invalid, 0)`
+returns EBADF; `write(1, invalid, 0)` returns zero; a 4097-byte write returns
+EINVAL before examining the pointer. A valid first page followed by an
+unmapped, protected or foreign-owned page returns EFAULT without reading or
+emitting any of the buffer. Valid writes copy through a 128-byte kernel buffer.
+
+The ABI constants in `kernel/src/userspace/abi.rs` supply the embedded assembly
+programs through `global_asm!` operands. The production SVC dispatcher and
+bounded copy implementation live in `kernel/src/userspace/syscall.rs`, shared
+by the real vector handler and host tests. Task ownership, root switching and
+exit/fault/timeout bookkeeping remain in `runtime.rs`.
+
 ## Exceptions, return and resource lifetime
 
 Lower-A64 vectors save 816 bytes on SP_EL1: the original 272-byte GP/ELR/SPSR/ESR
@@ -66,12 +82,20 @@ reset their FP environment while retaining the user's saved state. Returning
 syscalls/IRQs restore it and ERET to EL0. Other synchronous user exceptions
 terminate the task with saved ESR/ELR/FAR/SP diagnostics; kernel faults remain
 fatal diagnostics.
+Rust's shared kernel-private frame is defined in `kernel/src/arch/context.rs`,
+with compile-time size/alignment/offset checks for every assembly field.
 
 The 256-byte suspended kernel runner preserves x19..x30, full q8..q15, kernel
 FP state, original SP_EL0 and DAIF. A terminating vector discards its own frame
 and returns to that runner at EL1h. No mutable task-cell borrow spans ERET.
 Three timer IRQs actually taken from EL0 terminate a non-exiting task. EL1 ticks
 between publication and entry do not shorten this budget.
+Before allocating or running the demos, an EL1 preflight requires two new timer
+events within three counter seconds; failure prints read-only diagnostics and
+prevents user entry. This is separate from the actual EL0 IRQ test. Diagnostic
+fault programs additionally verify the syndrome subtype/direction/level and
+exact instruction/address/stack state; ordinary user faults still terminate
+with their original captured diagnostics.
 
 The kernel restores its TTBR0 and completes full TLBI before freeing any task
 page or table. All pages are initially zeroed and are reclaimed after exit,

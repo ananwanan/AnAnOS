@@ -252,7 +252,9 @@ pub fn current_counter() -> u64 {
             "isb",
             "mrs {value}, cntpct_el0",
             value = out(reg) value,
-            options(nomem, nostack, preserves_flags),
+            // No nomem: preflight samples IRQ memory state before this timestamp.
+            // The compiler barrier and ISB preserve that measurement order.
+            options(nostack, preserves_flags),
         );
     }
 

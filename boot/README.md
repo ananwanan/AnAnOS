@@ -140,7 +140,9 @@ EL1h synchronous exceptions/IRQs and optional lower-A64 EL0 exceptions:
 | 808 | `FAR_EL1` |
 
 The first 272 bytes remain the `#[repr(C)] ExceptionContext` exposed to Rust.
-The FP/SIMD extension is saved and restored by assembly. Normal AAPCS64 calls
+The full kernel-private `ExceptionFrame` in `kernel/src/arch/context.rs` checks
+all offsets, size and alignment at compile time. The FP/SIMD extension is saved
+and restored by assembly. Normal AAPCS64 calls
 only preserve a subset of vector state; an exception can interrupt a live
 vector computation at any instruction, so the entry code preserves all of it.
 This covers Cortex-A72 FP/Advanced SIMD; it does not claim SVE/SME support.
