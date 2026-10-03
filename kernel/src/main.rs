@@ -3,6 +3,7 @@
 #![no_main]
 
 mod arch;
+mod boot_memory;
 mod console;
 mod drivers;
 mod graphics;
@@ -17,6 +18,7 @@ use drivers::framebuffer::FrameBuffer;
 use drivers::gic::Gic;
 use drivers::mailbox::Mailbox;
 use drivers::uart::MiniUart;
+use kernel::memory::region::Region;
 
 global_asm!(include_str!("../../boot/boot.S"));
 global_asm!(include_str!("../../boot/vectors.S"));
@@ -58,12 +60,12 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
     println!("Board       : Raspberry Pi 4B");
     println!("Architecture: AArch64");
 
+    // Install vectors before dereferencing firmware pointers or initializing devices.
+    arch::exception::init();
+
     init_mailbox();
 
-    init_framebuffer();
-
-    // 初始化异常向量
-    arch::exception::init();
+    let framebuffer = init_framebuffer();
 
     {
         // 测试定时器
@@ -75,6 +77,17 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
     }
 
     println!("DTB address : {dtb_address:#018x}");
+    match unsafe { boot_memory::init(dtb_address, framebuffer) } {
+        Ok(stats) => {
+            println!("[ OK ] PHYSICAL PAGE ALLOCATOR");
+            println!("Pages total : {}", stats.total_pages);
+            println!("Pages free  : {}", stats.free_pages);
+        }
+        Err(error) => {
+            println!("[FAIL] PHYSICAL MEMORY: {error:?}");
+            println!("Memory-dependent subsystems unavailable");
+        }
+    }
     println!();
 
     println!();
@@ -157,12 +170,6 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
             core::arch::asm!("wfi", options(nomem, nostack, preserves_flags),);
         }
     }
-
-    loop {
-        unsafe {
-            asm!("wfe");
-        }
-    }
 }
 
 /// 初始化 Mailbox 并获取固件修订号。
@@ -181,12 +188,20 @@ fn init_mailbox() {
 }
 
 /// 初始化 Framebuffer 并绘制测试图案。
-fn init_framebuffer() {
+fn init_framebuffer() -> Option<Region> {
     println!();
     println!("Initializing framebuffer...");
 
     match FrameBuffer::new(1920, 1080) {
         Ok(framebuffer) => {
+            let region =
+                Region::from_size(framebuffer.address(), framebuffer.size() as usize).ok()?;
+            let (width, height, depth, pitch) = (
+                framebuffer.width(),
+                framebuffer.height(),
+                framebuffer.depth(),
+                framebuffer.pitch(),
+            );
             // 安装前，这些日志只输出到 UART。
             println!("[ OK ] Framebuffer allocated");
             println!("Address    : {:#018x}", framebuffer.address());
@@ -220,16 +235,18 @@ fn init_framebuffer() {
             println!();
             println!("BOARD       : RASPBERRY PI 4B");
             println!("ARCHITECTURE: AARCH64");
-            println!("RESOLUTION  : 1920X1080");
-            println!("DEPTH       : 32 BIT");
-            println!("PITCH       : 7680 BYTES");
+            println!("RESOLUTION  : {width}X{height}");
+            println!("DEPTH       : {depth} BIT");
+            println!("PITCH       : {pitch} BYTES");
             println!();
             println!("WELCOME TO ANANOS!");
+            Some(region)
         }
 
         Err(error) => {
             println!("[FAIL] Framebuffer initialization");
             println!("Error: {error:?}");
+            None
         }
     }
 }

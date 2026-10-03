@@ -2,6 +2,12 @@
 
 A tiny operating system written in Rust for Raspberry Pi 4.
 
+Implementation milestones and acceptance gates are tracked in
+[docs/ROADMAP.md](docs/ROADMAP.md). Physical-memory ownership and validation are
+documented in [docs/memory.md](docs/memory.md). Run
+`.\scripts\check_windows.ps1` for host logic tests, workspace checks and both
+boot images; this does not deploy to a board or prove hardware behavior.
+
 Current Target:
 
 - Raspberry Pi 4B

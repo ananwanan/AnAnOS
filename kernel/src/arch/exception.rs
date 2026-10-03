@@ -13,6 +13,12 @@ pub struct ExceptionContext {
     pub esr_el1: u64,
 }
 
+// boot/vectors.S appends SIMD/FP state after this unchanged 272-byte prefix.
+const _: () = assert!(core::mem::size_of::<ExceptionContext>() == 272);
+const _: () = assert!(core::mem::offset_of!(ExceptionContext, elr_el1) == 248);
+const _: () = assert!(core::mem::offset_of!(ExceptionContext, spsr_el1) == 256);
+const _: () = assert!(core::mem::offset_of!(ExceptionContext, esr_el1) == 264);
+
 unsafe extern "C" {
     static __exception_vectors: u8;
 }
@@ -130,27 +136,19 @@ pub fn enable_irq() {
     unsafe {
         /**
          * daifclr #2 中的立即数是四位掩码：
-         * bit 0: D
-         * bit 1: A
-         * bit 2: I
-         * bit 3: F
+         * bit 3: D
+         * bit 2: A
+         * bit 1: I
+         * bit 0: F
          */
-        core::arch::asm!(
-            "msr daifclr, #2",
-            "isb",
-            options(nomem, nostack, preserves_flags),
-        );
+        core::arch::asm!("msr daifclr, #2", "isb", options(nostack, preserves_flags),);
     }
 }
 
 /// 设置 PSTATE 中的 IRQ 屏蔽位。
 pub fn disable_irq() {
     unsafe {
-        core::arch::asm!(
-            "msr daifset, #2",
-            "isb",
-            options(nomem, nostack, preserves_flags),
-        );
+        core::arch::asm!("msr daifset, #2", "isb", options(nostack, preserves_flags),);
     }
 }
 

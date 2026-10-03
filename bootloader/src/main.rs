@@ -80,6 +80,16 @@ impl MiniUart {
             self.write_byte(byte);
         }
     }
+
+    fn flush(&self) {
+        // BCM2711 AUX_MU_LSR bit 6 means both FIFO empty and transmitter idle.
+        // Bit 5 only promises room for another byte, not completed transmission.
+        unsafe {
+            while read_volatile(AUX_MU_LSR_REG) & (1 << 6) == 0 {
+                core::hint::spin_loop();
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -94,6 +104,9 @@ pub extern "C" fn bootloader_main(dtb_address: usize) -> ! {
                 uart.write_string("OK ");
                 write_hex(&uart, size);
                 uart.write_string("\n");
+                // The kernel resets UART FIFOs during init; finish the complete
+                // acknowledgement first so the uploader reliably observes OK.
+                uart.flush();
                 jump_to_kernel(dtb_address);
             }
             Err(message) => {
@@ -164,10 +177,11 @@ fn jump_to_kernel(dtb_address: usize) -> ! {
             "ic iallu",
             "dsb sy",
             "isb",
-            "mov x0, {dtb}",
             "br {entry}",
-            dtb = in(reg) dtb_address,
             entry = in(reg) KERNEL_LOAD_ADDRESS,
+            // Reserve x0 explicitly so the entry address cannot be allocated
+            // there and then overwritten by the DTB argument.
+            in("x0") dtb_address,
             options(noreturn)
         );
     }
