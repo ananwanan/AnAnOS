@@ -19,6 +19,9 @@
 .extern __stack_top
 
 _start:
+    /* No installed vector table exists until Rust deliberately initializes it. */
+    msr     daifset, #0xf
+
     /*
      * x0 = Device Tree Blob 地址。
      * 保存到 x20，切换异常级不会破坏通用寄存器。
@@ -162,6 +165,32 @@ _start:
     lsr     x0, x0, #2
     cmp     x0, #1
     b.ne    .Lunsupported_el
+
+    /*
+     * A direct EL1 caller must already use physical addresses with caches off.
+     * Disabling a live MMU or dirty cache here would require a separate handoff
+     * protocol. Reject that environment instead of silently losing memory.
+     * The EL2 path above has established these bits before eret.
+     */
+    mrs     x0, sctlr_el1
+    ldr     x1, =(SCTLR_EL1_M | SCTLR_EL1_C | SCTLR_EL1_I)
+    tst     x0, x1
+    b.ne    .Lunsupported_el
+
+    /* Also establish RES1 and endianness for the direct EL1 entry path. */
+    ldr     x1, =SCTLR_EL1_RES1
+    orr     x0, x0, x1
+    bic     x0, x0, #SCTLR_EL1_E0E
+    bic     x0, x0, #SCTLR_EL1_EE
+    dsb     sy
+    msr     sctlr_el1, x0
+    isb
+
+    /* Both boot paths must enable SIMD before Rust or the vectors use it. */
+    mrs     x0, cpacr_el1
+    orr     x0, x0, #(3 << 20)
+    msr     cpacr_el1, x0
+    isb
 
     /*
      * EL1h 应当已经选择 SP_EL1。

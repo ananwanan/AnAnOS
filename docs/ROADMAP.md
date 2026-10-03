@@ -1,0 +1,48 @@
+# AnanOS 实施与验收路线
+
+目标是 Raspberry Pi 4B 上的 Unix/POSIX 风格操作系统，最终能运行本机
+C/C++/Rust 工具链。按 AGENTS.md 的依赖顺序推进；代码完成、主机测试通过和
+实机验收分别记录，不能互相替代。
+
+## 当前里程碑：M1 物理内存与启动安全
+
+实现范围：
+
+- 保留 EL1h、CPU0、Mini UART、GICv2、Generic Physical Timer 的现有启动路径。
+- 异常帧保存全部通用寄存器、SIMD 寄存器、FPCR/FPSR。
+- DTB 解析 RAM、保留区、initrd 和动态保留池约束。
+- 4 KiB 物理页分配、清零、回收及错误检查。
+- CPU0 IRQ 临界区和控制台重入处理。
+- 可复用的主机测试、镜像构建和板上诊断。
+
+验收状态：代码、35 项主机测试和镜像检查通过，见
+[M1 验证记录](validation/M1.md)；实机 UART、
+HDMI、持续 timer IRQ、页清零/回收及可选 SIMD BRK 诊断仍须在板上观察。
+内存错误会禁用内存相关子系统，并保留已有设备诊断路径。
+
+## 后续里程碑与依赖
+
+| 阶段 | 交付能力 | 通过条件 |
+| --- | --- | --- |
+| M2 | 内核堆、页表、MMU、内存属性 | 分配/释放压力测试；RAM、MMIO、mailbox、framebuffer 属性明确；实机 IRQ 与设备访问不退化 |
+| M3 | EL0、地址空间、上下文切换、最小 syscall | Gate A：EL0 程序通过 SVC 输出并退出；非法用户指针可控失败；内核隔离有效 |
+| M4 | 进程、静态 ELF64、initramfs、VFS/FD | 独立 ELF 加载；argv/envp；stdin/out/err；文件与目录；exec/wait；多进程资源回收 |
+| M5 | 用户 VM、CRT、libc、sysroot、cross Binutils/GCC | Gate B/C：静态 C hello、malloc/free、文件、时间和多进程程序在板上运行 |
+| M6 | TLS、线程、信号、libstdc++、Rust core/alloc/std | Gate D/E：C++ 容器/异常/线程和普通 Rust std 程序可交叉编译并执行 |
+| M7 | 可写持久存储、shell、构建工具、本机编译器 | Gate F/G/H/I：板上 gcc/g++/rustc 编译并执行程序，Cargo 离线构建 |
+
+动态链接在静态程序稳定后引入。在线 Cargo 另依赖网络、DNS、TLS 和证书，
+不作为早期离线工具链验收条件。ABI 在 EL0/syscall 实现时集中写入 `docs/abi/`；
+当前不发布固定 AnanOS target triple，不把 Linux syscall 或内核 Rust 类型
+直接当成公开 ABI。
+
+## 每个里程碑的执行规则
+
+1. 读取实际代码及相关设计文档，检查当前分支和工作区。
+2. 完成依赖最低的可测试纵向切片，记录资源所有权及失败路径。
+3. 运行格式、workspace、相关包、主机逻辑测试及镜像检查。
+4. 对真实硬件相关行为保留诊断，记录板上证据后才标记硬件通过。
+5. 同步能力状态和下一阶段入口，不把后续 libc/toolchain 策略塞进内核。
+
+M2 的入口是本阶段的物理页所有权 API。实现堆和页表前先完成 M1 板上验收；
+首次开启 MMU/cache 前先固定地址布局和 mailbox/DMA 一致性规则。

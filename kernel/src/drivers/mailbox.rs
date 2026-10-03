@@ -18,6 +18,7 @@ pub const RESPONSE_SUCCESS: u32 = 0x8000_0000;
 pub const RESPONSE_ERROR: u32 = 0x8000_0001;
 
 pub const TAG_GET_FIRMWARE_REVISION: u32 = 0x0000_0001;
+const TAG_GET_VC_MEMORY: u32 = 0x0001_0006;
 pub const END_TAG: u32 = 0x0000_0000;
 
 /// 将 ARM 物理地址转换成 VideoCore 可访问的总线地址。
@@ -193,6 +194,19 @@ struct FirmwareRevisionMessage {
 }
 
 impl Mailbox {
+    /// Firmware-owned physical RAM must remain outside the page allocator.
+    /// Values are ARM physical base/size, not a VideoCore bus address.
+    pub fn vc_memory(&self) -> Result<(usize, usize), MailboxError> {
+        #[repr(C, align(16))]
+        struct Message([u32; 8]);
+        let mut message = Message([32, REQUEST_CODE, TAG_GET_VC_MEMORY, 8, 0, 0, 0, END_TAG]);
+        self.property_call(message.0.as_mut_ptr())?;
+        if message.0[4] & 0x8000_0000 == 0 || message.0[4] & 0x7fff_ffff < 8 {
+            return Err(MailboxError::InvalidResponse);
+        }
+        Ok((message.0[5] as usize, message.0[6] as usize))
+    }
+
     /// 获取 VideoCore 固件版本号。
     pub fn firmware_revision(&self) -> Result<u32, MailboxError> {
         let mut message = FirmwareRevisionMessage {

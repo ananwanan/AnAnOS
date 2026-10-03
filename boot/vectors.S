@@ -7,6 +7,31 @@
 .extern rust_sync_exception
 .extern rust_irq_exception
 
+/*
+ * The first 272 bytes match Rust's repr(C) ExceptionContext. The remaining
+ * state is private to assembly: q0..q31 at 272..783, FPCR at 784, FPSR at 792.
+ * An exception can interrupt any instruction, so the ordinary AAPCS64
+ * callee-saved subset is insufficient; preserve every 128-bit SIMD register.
+ * 800 bytes keeps the interrupted 16-byte stack alignment at the Rust call.
+ */
+.equ CONTEXT_SIZE,   800
+.equ SIMD_OFFSET,    272
+.equ FPCR_OFFSET,    784
+.equ FPSR_OFFSET,    792
+
+.if (CONTEXT_SIZE % 16) != 0
+    .error "exception frame must preserve AAPCS64 stack alignment"
+.endif
+.if SIMD_OFFSET != (34 * 8)
+    .error "SIMD state must follow the Rust ExceptionContext prefix"
+.endif
+.if FPCR_OFFSET != (SIMD_OFFSET + 32 * 16)
+    .error "FPCR slot overlaps SIMD state"
+.endif
+.if CONTEXT_SIZE != (FPSR_OFFSET + 8)
+    .error "exception frame tail does not match its allocation"
+.endif
+
 .macro vector_entry handler
     b \handler
     .space 124
@@ -14,7 +39,7 @@
 
 
 .macro SAVE_CONTEXT
-    sub sp, sp, #(34 * 8)
+    sub sp, sp, #CONTEXT_SIZE
 
     stp x0,  x1,  [sp, #(0  * 8)]
     stp x2,  x3,  [sp, #(2  * 8)]
@@ -42,6 +67,28 @@
 
     mrs x0, esr_el1
     str x0, [sp, #(33 * 8)]
+
+    stp q0,  q1,  [sp, #(SIMD_OFFSET + 0)]
+    stp q2,  q3,  [sp, #(SIMD_OFFSET + 32)]
+    stp q4,  q5,  [sp, #(SIMD_OFFSET + 64)]
+    stp q6,  q7,  [sp, #(SIMD_OFFSET + 96)]
+    stp q8,  q9,  [sp, #(SIMD_OFFSET + 128)]
+    stp q10, q11, [sp, #(SIMD_OFFSET + 160)]
+    stp q12, q13, [sp, #(SIMD_OFFSET + 192)]
+    stp q14, q15, [sp, #(SIMD_OFFSET + 224)]
+    stp q16, q17, [sp, #(SIMD_OFFSET + 256)]
+    stp q18, q19, [sp, #(SIMD_OFFSET + 288)]
+    stp q20, q21, [sp, #(SIMD_OFFSET + 320)]
+    stp q22, q23, [sp, #(SIMD_OFFSET + 352)]
+    stp q24, q25, [sp, #(SIMD_OFFSET + 384)]
+    stp q26, q27, [sp, #(SIMD_OFFSET + 416)]
+    stp q28, q29, [sp, #(SIMD_OFFSET + 448)]
+    stp q30, q31, [sp, #(SIMD_OFFSET + 480)]
+
+    mrs x0, fpcr
+    str x0, [sp, #FPCR_OFFSET]
+    mrs x0, fpsr
+    str x0, [sp, #FPSR_OFFSET]
 .endm
 
 
@@ -51,6 +98,28 @@
 
     ldr x0, [sp, #(32 * 8)]
     msr spsr_el1, x0
+
+    ldp q0,  q1,  [sp, #(SIMD_OFFSET + 0)]
+    ldp q2,  q3,  [sp, #(SIMD_OFFSET + 32)]
+    ldp q4,  q5,  [sp, #(SIMD_OFFSET + 64)]
+    ldp q6,  q7,  [sp, #(SIMD_OFFSET + 96)]
+    ldp q8,  q9,  [sp, #(SIMD_OFFSET + 128)]
+    ldp q10, q11, [sp, #(SIMD_OFFSET + 160)]
+    ldp q12, q13, [sp, #(SIMD_OFFSET + 192)]
+    ldp q14, q15, [sp, #(SIMD_OFFSET + 224)]
+    ldp q16, q17, [sp, #(SIMD_OFFSET + 256)]
+    ldp q18, q19, [sp, #(SIMD_OFFSET + 288)]
+    ldp q20, q21, [sp, #(SIMD_OFFSET + 320)]
+    ldp q22, q23, [sp, #(SIMD_OFFSET + 352)]
+    ldp q24, q25, [sp, #(SIMD_OFFSET + 384)]
+    ldp q26, q27, [sp, #(SIMD_OFFSET + 416)]
+    ldp q28, q29, [sp, #(SIMD_OFFSET + 448)]
+    ldp q30, q31, [sp, #(SIMD_OFFSET + 480)]
+
+    ldr x0, [sp, #FPCR_OFFSET]
+    msr fpcr, x0
+    ldr x0, [sp, #FPSR_OFFSET]
+    msr fpsr, x0
 
     ldp x0,  x1,  [sp, #(0  * 8)]
     ldp x2,  x3,  [sp, #(2  * 8)]
@@ -70,7 +139,7 @@
 
     ldr x30, [sp, #(30 * 8)]
 
-    add sp, sp, #(34 * 8)
+    add sp, sp, #CONTEXT_SIZE
 .endm
 
 

@@ -1,5 +1,6 @@
 [toolchain]
 channel = "stable"
+targets = ["aarch64-unknown-none"]
 components = [
     "rust-src",
     "llvm-tools"
