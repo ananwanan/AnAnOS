@@ -31,6 +31,7 @@ pub enum UserCopyError {
     Unmapped,
     PermissionDenied,
     DeviceMemory,
+    NotOwned,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,8 +52,9 @@ fn range_end(address: u64, length: usize) -> Result<u64, UserCopyError> {
 }
 
 /// Translate the next copy chunk without accessing user bytes. The whole range
-/// must be validated first with `validate_user_range` to avoid partial writes
-/// or output when a later page is unmapped. Zero-length chunks are invalid.
+/// must be validated first with `validate_owned_user_range` before accessing
+/// task-owned bytes, so a later invalid page cannot cause partial effects.
+/// Zero-length chunks are invalid.
 pub fn user_chunk(
     tables: &PageTables,
     memory: &impl TableMemory,
@@ -94,10 +96,29 @@ pub fn validate_user_range(
     length: usize,
     access: UserAccess,
 ) -> Result<(), UserCopyError> {
+    validate_owned_user_range(tables, memory, address, length, access, |_, _| true)
+}
+
+/// Validate mapping permissions and task ownership for the complete range
+/// before any bytes are read, written, or emitted. `owns` checks physical byte
+/// ranges, including offsets within a page and physically discontiguous pages.
+/// The caller must keep mappings and ownership stable through validation and
+/// the later copy. Empty ranges validate the pointer but need no owned pages.
+pub fn validate_owned_user_range(
+    tables: &PageTables,
+    memory: &impl TableMemory,
+    address: u64,
+    length: usize,
+    access: UserAccess,
+    owns: impl Fn(u64, usize) -> bool,
+) -> Result<(), UserCopyError> {
     let end = range_end(address, length)?;
     let mut cursor = address;
     while cursor < end {
         let chunk = user_chunk(tables, memory, cursor, (end - cursor) as usize, access)?;
+        if !owns(chunk.physical_address, chunk.length) {
+            return Err(UserCopyError::NotOwned);
+        }
         cursor += chunk.length as u64;
     }
     Ok(())

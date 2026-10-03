@@ -5,7 +5,23 @@
 
 use core::arch::global_asm;
 
-global_asm!(include_str!("../../../boot/user.S"));
+use crate::userspace::abi::{self, Errno};
+use crate::userspace::space::USER_CODE;
+
+global_asm!(
+    include_str!("../../../boot/user.S"),
+    sys_write = const abi::SYS_WRITE,
+    sys_exit = const abi::SYS_EXIT,
+    sys_yield = const abi::SYS_YIELD,
+    stdout = const abi::STDOUT,
+    stderr = const abi::STDERR,
+    max_write_bytes = const abi::MAX_WRITE_BYTES,
+    svc_immediate = const abi::SVC_IMMEDIATE,
+    errno_ebadf = const Errno::BadFileDescriptor as i64,
+    errno_efault = const Errno::Fault as i64,
+    errno_einval = const Errno::InvalidArgument as i64,
+    errno_enosys = const Errno::NotImplemented as i64,
+);
 
 unsafe extern "C" {
     fn arch_enter_user(entry: u64, stack_top: u64, argument: u64) -> u64;
@@ -13,10 +29,13 @@ unsafe extern "C" {
     static __user_image_end: u8;
     static __user_fault_start: u8;
     static __user_fault_end: u8;
+    static __user_fault_pc: u8;
     static __user_readonly_start: u8;
     static __user_readonly_end: u8;
+    static __user_readonly_pc: u8;
     static __user_guard_start: u8;
     static __user_guard_end: u8;
+    static __user_guard_pc: u8;
     static __user_timeout_start: u8;
     static __user_timeout_end: u8;
 }
@@ -41,7 +60,8 @@ pub unsafe fn run(entry: u64, stack_top: u64, argument: u64) -> u64 {
     unsafe { arch_enter_user(entry, stack_top, argument) }
 }
 
-/// Position-independent syscall exercise, including private-stack stores.
+/// Position-independent syscall/error exercise with a cross-page stack buffer
+/// and preserved GP/SIMD/FP/SP checks after every returning SVC.
 pub fn demo_image() -> &'static [u8] {
     image(
         core::ptr::addr_of!(__user_image_start),
@@ -57,11 +77,27 @@ pub fn kernel_fault_image() -> &'static [u8] {
     )
 }
 
+/// EL0 address of the kernel-read instruction after copying its image to USER_CODE.
+pub fn kernel_fault_pc() -> u64 {
+    fault_pc(
+        core::ptr::addr_of!(__user_fault_start),
+        core::ptr::addr_of!(__user_fault_pc),
+    )
+}
+
 /// Store into this image's RX mapping to exercise write permission faults.
 pub fn readonly_fault_image() -> &'static [u8] {
     image(
         core::ptr::addr_of!(__user_readonly_start),
         core::ptr::addr_of!(__user_readonly_end),
+    )
+}
+
+/// EL0 address of the RX-page store after copying its image to USER_CODE.
+pub fn readonly_fault_pc() -> u64 {
+    fault_pc(
+        core::ptr::addr_of!(__user_readonly_start),
+        core::ptr::addr_of!(__user_readonly_pc),
     )
 }
 
@@ -73,12 +109,26 @@ pub fn guard_fault_image() -> &'static [u8] {
     )
 }
 
+/// EL0 address of the guard-page store after copying its image to USER_CODE.
+pub fn guard_fault_pc() -> u64 {
+    fault_pc(
+        core::ptr::addr_of!(__user_guard_start),
+        core::ptr::addr_of!(__user_guard_pc),
+    )
+}
+
 /// Run until lower-A64 timer IRQ handling terminates the process.
 pub fn timeout_image() -> &'static [u8] {
     image(
         core::ptr::addr_of!(__user_timeout_start),
         core::ptr::addr_of!(__user_timeout_end),
     )
+}
+
+fn fault_pc(start: *const u8, instruction: *const u8) -> u64 {
+    // The linker label is attached to the faulting instruction inside this
+    // image. Relocating the bytes preserves its offset, not its kernel address.
+    USER_CODE + (instruction as usize - start as usize) as u64
 }
 
 fn image(start: *const u8, end: *const u8) -> &'static [u8] {

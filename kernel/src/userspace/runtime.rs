@@ -6,28 +6,20 @@
 use core::cell::UnsafeCell;
 use core::ptr;
 
-use super::abi::{self, Errno, SyscallRequest};
+use super::abi::{self, Errno};
+use super::fault::{AbortKind, DataAbort, ExpectedFault};
+use super::preflight::{self, PreflightError, TimerSource};
 use super::space::{self, UserAccess};
-use crate::arch::{exception, interrupt, mmu as cpu, user};
+use super::syscall::{self, Action};
+use crate::arch::context::ExceptionFrame as UserExceptionFrame;
+use crate::arch::{exception, interrupt, mmu as cpu, timer, user};
+use crate::drivers::gic::Gic;
 use crate::memory::mmu::{self, PhysicalTableMemory};
 use crate::memory::page::{PageError, PhysicalPages};
 use crate::memory::paging::{PageTables, PagingError};
 
 const PAGE_SIZE: usize = 4096;
 const MAX_TASK_TICKS: u64 = 3;
-
-#[repr(C, align(16))]
-pub struct UserExceptionFrame {
-    pub context: exception::ExceptionContext,
-    pub simd: [[u64; 2]; 32],
-    pub fpcr: u64,
-    pub fpsr: u64,
-    pub sp_el0: u64,
-    pub far_el1: u64,
-}
-const _: () = assert!(core::mem::size_of::<UserExceptionFrame>() == 816);
-const _: () = assert!(core::mem::offset_of!(UserExceptionFrame, sp_el0) == 800);
-const _: () = assert!(core::mem::offset_of!(UserExceptionFrame, far_el1) == 808);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Outcome {
@@ -51,6 +43,7 @@ pub enum UserError {
     InvalidImage,
     Busy,
     InvalidMapping,
+    IrqPreflight(PreflightError),
     ProbeFailed(u64),
     UnexpectedOutcome,
     LeakedPages,
@@ -84,6 +77,9 @@ struct State {
     rejected_pointers: u64,
     unknown_syscalls: u64,
     yields: u64,
+    svc_calls: u64,
+    bad_descriptors: u64,
+    invalid_requests: u64,
 }
 
 impl State {
@@ -101,6 +97,9 @@ impl State {
             rejected_pointers: 0,
             unknown_syscalls: 0,
             yields: 0,
+            svc_calls: 0,
+            bad_descriptors: 0,
+            invalid_requests: 0,
         }
     }
 
@@ -168,12 +167,144 @@ impl Case {
             Self::Timeout => user::timeout_image(),
         }
     }
+
+    fn expected_fault(self, kernel_text_level: u8) -> Option<ExpectedFault> {
+        let (kind, level, write, address, pc) = match self {
+            Self::KernelFault => (
+                AbortKind::Permission,
+                kernel_text_level,
+                false,
+                0x20_0000,
+                user::kernel_fault_pc(),
+            ),
+            Self::ReadOnlyFault => (
+                AbortKind::Permission,
+                3,
+                true,
+                space::USER_CODE,
+                user::readonly_fault_pc(),
+            ),
+            Self::GuardFault => (
+                AbortKind::Translation,
+                3,
+                true,
+                space::USER_STACK_BASE - 8,
+                user::guard_fault_pc(),
+            ),
+            _ => return None,
+        };
+        Some(ExpectedFault {
+            kind,
+            level,
+            write,
+            address,
+            pc,
+            stack: space::USER_STACK_TOP,
+        })
+    }
+}
+
+struct KernelTimer;
+impl TimerSource for KernelTimer {
+    fn frequency(&mut self) -> u64 {
+        timer::Timer::new().frequency()
+    }
+    fn counter(&mut self) -> u64 {
+        timer::current_counter()
+    }
+    fn timer_ticks(&mut self) -> u64 {
+        exception::timer_ticks()
+    }
+    fn irq_masked(&mut self) -> bool {
+        exception::irq_is_masked()
+    }
+}
+
+fn verify_timer_irq() -> Result<(), UserError> {
+    crate::println!("[INFO] EL0 IRQ PREFLIGHT: WAITING FOR TWO EL1 TIMER EVENTS");
+    match preflight::wait_for_timer_irq(&mut KernelTimer) {
+        Ok(report) => {
+            crate::println!(
+                "[ OK ] EL0 IRQ PREFLIGHT: events={}, counter ticks={}",
+                report.timer_events,
+                report.elapsed_counter_ticks
+            );
+            Ok(())
+        }
+        Err(error) => {
+            print_irq_preflight_failure(error);
+            Err(UserError::IrqPreflight(error))
+        }
+    }
+}
+
+fn print_irq_preflight_failure(error: PreflightError) {
+    struct Snapshot {
+        daif: u64,
+        frequency: u64,
+        counter: u64,
+        deadline: u64,
+        control: u64,
+        ticks: u64,
+        distributor: u32,
+        interface: u32,
+        priority_mask: u32,
+        enabled: u32,
+        pending: u32,
+        groups: u32,
+        highest: u32,
+        alternate_highest: u32,
+        running_priority: u32,
+    }
+    // Capture the original mask, not the temporary mask used for the snapshot.
+    let original_daif = exception::daif();
+    let snapshot = interrupt::with_irq_masked(|| {
+        let gic = Gic::new();
+        Snapshot {
+            daif: original_daif,
+            frequency: timer::Timer::new().frequency(),
+            counter: timer::current_counter(),
+            deadline: timer::compare_value(),
+            control: timer::control(),
+            ticks: exception::timer_ticks(),
+            distributor: gic.distributor_control(),
+            interface: gic.cpu_interface_control(),
+            priority_mask: gic.priority_mask(),
+            enabled: gic.enabled_private_interrupts(),
+            pending: gic.pending_private_interrupts(),
+            groups: gic.private_interrupt_groups(),
+            highest: gic.highest_pending_interrupt(),
+            alternate_highest: gic.group1_highest_pending_interrupt(),
+            running_priority: gic.running_priority(),
+        }
+    });
+    // No IAR read: diagnostics must not acknowledge or alter pending IRQs.
+    crate::println!("[FAIL] EL0 IRQ PREFLIGHT: {error:?}; USER TASKS NOT ENTERED");
+    crate::println!("DAIF          : {:#018x}", snapshot.daif);
+    crate::println!("CNTFRQ        : {}", snapshot.frequency);
+    crate::println!("CNTPCT        : {:#018x}", snapshot.counter);
+    crate::println!("CNTP_CVAL     : {:#018x}", snapshot.deadline);
+    crate::println!("TIMER CONTROL : {:#010x}", snapshot.control);
+    crate::println!("TIMER PENDING : {}", snapshot.control & (1 << 2) != 0);
+    crate::println!("TIMER TICKS   : {}", snapshot.ticks);
+    crate::println!("GICD_CTLR     : {:#010x}", snapshot.distributor);
+    crate::println!("GICC_CTLR     : {:#010x}", snapshot.interface);
+    crate::println!("GICC_PMR      : {:#010x}", snapshot.priority_mask);
+    crate::println!("ISENABLER0    : {:#010x}", snapshot.enabled);
+    crate::println!("ISPENDR0      : {:#010x}", snapshot.pending);
+    crate::println!("IGROUPR0 (NS) : {:#010x}", snapshot.groups);
+    crate::println!("HPPIR         : {}", snapshot.highest);
+    crate::println!("AHPPIR        : {}", snapshot.alternate_highest);
+    crate::println!("GICC_RPR      : {:#010x}", snapshot.running_priority);
 }
 
 pub fn run_demos() -> Result<(), UserError> {
-    if exception::irq_is_masked() || !cpu::is_enabled() {
+    if !cpu::is_enabled() {
         return Err(UserError::InvalidMapping);
     }
+    // No task-cell borrow or allocated user pages while IRQ is being observed.
+    // This proves EL1 timer/rearm delivery, not the later lower-EL vector path.
+    verify_timer_irq()?;
     let before = crate::memory::page_stats();
     let heap_before = crate::memory::heap_free_bytes();
     for case in [
@@ -198,11 +329,29 @@ fn run_case(case: Case) -> Result<(), UserError> {
     let kernel_root = mmu::kernel_root().map_err(UserError::Memory)?;
     // IRQ was enabled by GIC setup. This closure restores that mask on return;
     // user::run therefore permits EL0 IRQs, without holding the cell borrow.
-    let preparation = TASK.with(|state| prepare(state, case.image()));
-    if let Err(error) = preparation {
-        TASK.with(State::reclaim)?;
-        return Err(error);
-    }
+    let preparation = TASK.with(|state| -> Result<_, UserError> {
+        prepare(state, case.image())?;
+        // Kernel text can use a page or block as the image grows. Derive its
+        // expected permission-fault level from the actual frozen task mapping.
+        let kernel_text_level = state
+            .tables
+            .as_ref()
+            .and_then(|tables| tables.lookup(&state.memory, 0x20_0000))
+            .ok_or(UserError::InvalidMapping)?
+            .level;
+        Ok(case.expected_fault(kernel_text_level))
+    });
+    let expected_fault = match preparation {
+        Ok(expected) => expected,
+        Err(error) => {
+            // A Busy result belongs to an existing runner. Never free its live
+            // root/pages as if they were this invocation's partial construction.
+            if !matches!(error, UserError::Busy) {
+                TASK.with(State::reclaim)?;
+            }
+            return Err(error);
+        }
+    };
     let switching = TASK.with(|state| -> Result<(), UserError> {
         let root = state
             .tables
@@ -228,37 +377,37 @@ fn run_case(case: Case) -> Result<(), UserError> {
     unsafe {
         user::run(space::USER_CODE, space::USER_STACK_TOP, 0x20_0000);
     }
-    let (outcome, irq_count, valid_calls) = TASK.with(|state| -> Result<_, UserError> {
+    let (outcome, irq_count, calls) = TASK.with(|state| -> Result<_, UserError> {
         // The runner has restored EL1's stack/FP state. Switch and flush BEFORE
         // releasing any page, even after a terminating synchronous exception.
         unsafe { cpu::switch_root(kernel_root) }.expect("restore validated kernel root");
         let result = (
             state.outcome,
             state.irq_count,
-            state.writes != 0
-                && state.rejected_pointers != 0
-                && state.unknown_syscalls != 0
-                && state.yields != 0,
+            [
+                state.svc_calls,
+                state.writes,
+                state.rejected_pointers,
+                state.bad_descriptors,
+                state.invalid_requests,
+                state.unknown_syscalls,
+                state.yields,
+            ],
         );
         state.reclaim()?;
         Ok(result)
     })?;
     let passed = match (case, outcome) {
-        (Case::Hello, Outcome::Exit(0)) => valid_calls,
+        (Case::Hello, Outcome::Exit(0)) => calls == [12, 3, 3, 1, 2, 1, 1],
         (
-            Case::KernelFault,
+            _,
             Outcome::Fault {
                 esr,
-                address: 0x20_0000,
-                ..
+                pc,
+                address,
+                stack,
             },
-        ) => (esr >> 26) & 0x3F == 0x24,
-        (Case::ReadOnlyFault, Outcome::Fault { esr, address, .. }) => {
-            (esr >> 26) & 0x3F == 0x24 && address == space::USER_CODE
-        }
-        (Case::GuardFault, Outcome::Fault { esr, address, .. }) => {
-            (esr >> 26) & 0x3F == 0x24 && address == space::USER_STACK_BASE - 8
-        }
+        ) => expected_fault.is_some_and(|expected| expected.matches(esr, pc, address, stack)),
         (Case::Timeout, Outcome::Timeout) => irq_count >= MAX_TASK_TICKS,
         _ => false,
     };
@@ -271,8 +420,54 @@ fn run_case(case: Case) -> Result<(), UserError> {
     {
         crate::println!("EL0 FAULT: ESR={esr:#018x}, ELR={pc:#018x}");
         crate::println!("           FAR={address:#018x}, SP={stack:#018x}");
+        if let Some(abort) = DataAbort::decode(esr) {
+            crate::println!(
+                "EL0 ABORT: kind={:?}, level={:?}, DFSC={:#04x}, write={}",
+                abort.kind,
+                abort.level,
+                abort.dfsc,
+                abort.write
+            );
+            crate::println!(
+                "           IL={}, FAR valid={}, S1PTW={}, CM={}, EA={}",
+                abort.instruction_32bit,
+                abort.far_valid,
+                abort.stage1_walk,
+                abort.cache_maintenance,
+                abort.external_abort_type
+            );
+        }
+        if let Some(expected) = expected_fault {
+            crate::println!(
+                "EL0 EXPECT: kind={:?}, level={}, write={}, match={passed}",
+                expected.kind,
+                expected.level,
+                expected.write
+            );
+            if !passed {
+                crate::println!(
+                    "            ELR={:#018x}, FAR={:#018x}, SP={:#018x}",
+                    expected.pc,
+                    expected.address,
+                    expected.stack
+                );
+            }
+        }
     } else {
         crate::println!("EL0 RESULT: {outcome:?}; IRQ COUNT: {irq_count}");
+    }
+    if matches!(case, Case::Hello) {
+        // Print only after leaving the exception and restoring the kernel root.
+        crate::println!(
+            "EL0 SVC: calls={}, writes={}, EFAULT={}, EBADF={}, EINVAL={}, ENOSYS={}, yield={}",
+            calls[0],
+            calls[1],
+            calls[2],
+            calls[3],
+            calls[4],
+            calls[5],
+            calls[6]
+        );
     }
     if !passed {
         return Err(UserError::UnexpectedOutcome);
@@ -294,6 +489,9 @@ fn prepare(state: &mut State, image: &[u8]) -> Result<(), UserError> {
     state.rejected_pointers = 0;
     state.unknown_syscalls = 0;
     state.yields = 0;
+    state.svc_calls = 0;
+    state.bad_descriptors = 0;
+    state.invalid_requests = 0;
     state.code = Some(crate::memory::allocate_zeroed_pages(1, 1)?);
     state.data = Some(crate::memory::allocate_zeroed_pages(1, 1)?);
     state.stack = Some(crate::memory::allocate_zeroed_pages(
@@ -393,49 +591,40 @@ fn verify_user_hardware(state: &State) -> Result<(), UserError> {
 }
 
 fn syscall_write(state: &mut State, address: u64, length: usize) -> Result<u64, Errno> {
-    if length == 0 {
-        return Ok(0);
-    }
     let tables = state.tables.as_ref().ok_or(Errno::Fault)?;
-    space::validate_user_range(tables, &state.memory, address, length, UserAccess::Read)
-        .map_err(|_| Errno::Fault)?;
-    // Validate ownership for the ENTIRE buffer before emitting any output.
-    let mut offset = 0;
-    while offset < length {
-        let chunk = space::user_chunk(
-            tables,
-            &state.memory,
-            address + offset as u64,
-            length - offset,
-            UserAccess::Read,
-        )
-        .map_err(|_| Errno::Fault)?;
-        if !state.owns_chunk(chunk.physical_address, chunk.length) {
-            return Err(Errno::Fault);
-        }
-        offset += chunk.length;
+    let result = syscall::write_user_buffer(
+        tables,
+        &state.memory,
+        address,
+        length,
+        |physical, count| state.owns_chunk(physical, count),
+        |chunk, buffer| {
+            for (index, byte) in buffer.iter_mut().enumerate() {
+                // SAFETY: the shared copy path validated the entire range and
+                // ownership. TASK's IRQ guard keeps pages/mappings stable;
+                // read only the privileged Normal NC physical identity alias.
+                *byte =
+                    unsafe { ptr::read_volatile((chunk.physical_address as *const u8).add(index)) };
+            }
+        },
+        crate::console::write_bytes,
+    );
+    if result.is_ok() {
+        state.writes += 1;
     }
-    offset = 0;
-    let mut buffer = [0u8; 128];
-    while offset < length {
-        let chunk = space::user_chunk(
-            tables,
-            &state.memory,
-            address + offset as u64,
-            (length - offset).min(buffer.len()),
-            UserAccess::Read,
-        )
-        .map_err(|_| Errno::Fault)?;
-        for (index, byte) in buffer[..chunk.length].iter_mut().enumerate() {
-            // SAFETY: validated Normal NC user-owned bytes, accessed through
-            // the existing privileged physical identity alias, not an EL0 VA.
-            *byte = unsafe { ptr::read_volatile((chunk.physical_address as *const u8).add(index)) };
-        }
-        crate::console::write_bytes(&buffer[..chunk.length]);
-        offset += chunk.length;
+    result
+}
+
+impl syscall::Services for State {
+    fn write(&mut self, address: u64, length: usize) -> Result<u64, Errno> {
+        syscall_write(self, address, length)
     }
-    state.writes += 1;
-    Ok(length as u64)
+
+    fn yield_now(&mut self) {
+        // There is one synchronous task. This remains a hint until scheduling
+        // exists; it must return to the current EL0 context without losing it.
+        self.yields += 1;
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -445,7 +634,7 @@ pub extern "C" fn rust_user_sync_exception(frame: &mut UserExceptionFrame) -> u6
             panic!("unexpected lower-EL exception origin");
         }
         let esr = frame.context.esr_el1;
-        if (esr >> 26) & 0x3F != 0x15 {
+        if (esr >> 26) & 0x3F != syscall::AARCH64_SVC_CLASS {
             state.outcome = Outcome::Fault {
                 esr,
                 pc: frame.context.elr_el1,
@@ -454,50 +643,28 @@ pub extern "C" fn rust_user_sync_exception(frame: &mut UserExceptionFrame) -> u6
             };
             return 1;
         }
-        // SVC ELR already names the next instruction; never add 4 here.
-        if esr & 0xFFFF != 0 {
-            frame.context.registers[0] = Errno::InvalidArgument.result();
-            return 0;
-        }
-        let registers = &mut frame.context.registers;
-        let request = abi::decode_syscall(
-            registers[8],
-            [
-                registers[0],
-                registers[1],
-                registers[2],
-                registers[3],
-                registers[4],
-                registers[5],
-            ],
-        );
-        match request {
-            Ok(SyscallRequest::Write {
-                address, length, ..
-            }) => {
-                registers[0] = match syscall_write(state, address, length) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        state.rejected_pointers += 1;
-                        error.result()
-                    }
-                };
-            }
-            Ok(SyscallRequest::Exit { status }) => {
+        state.svc_calls += 1;
+        match syscall::dispatch(&mut frame.context, state).expect("validated EL0 SVC origin") {
+            Action::Exit(status) => {
                 state.outcome = Outcome::Exit(status);
+                // Vector action 1 discards its frame and resumes the EL1h
+                // runner. It restores the kernel root before page reclamation.
                 return 1;
             }
-            Ok(SyscallRequest::Yield) => {
-                state.yields += 1;
-                registers[0] = 0;
-            }
-            Err(error) => {
-                if error == Errno::NotImplemented {
+            Action::Resume => {
+                let result = frame.context.registers[0];
+                if result == Errno::Fault.result() {
+                    state.rejected_pointers += 1;
+                } else if result == Errno::BadFileDescriptor.result() {
+                    state.bad_descriptors += 1;
+                } else if result == Errno::InvalidArgument.result() {
+                    state.invalid_requests += 1;
+                } else if result == Errno::NotImplemented.result() {
                     state.unknown_syscalls += 1;
                 }
-                registers[0] = error.result();
             }
         }
+        // Vector action 0 restores every saved register and ERETs to EL0.
         0
     })
 }

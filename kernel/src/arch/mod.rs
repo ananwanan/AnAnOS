@@ -1,3 +1,4 @@
+pub mod context;
 pub mod exception;
 pub mod interrupt;
 #[cfg(feature = "mmu")]

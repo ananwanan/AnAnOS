@@ -13,8 +13,9 @@
 .endif
 
 /*
- * The first 272 bytes match Rust's repr(C) ExceptionContext. The remaining
- * state is private to assembly: q0..q31 at 272..783, FPCR at 784, FPSR at 792.
+ * The first 272 bytes match Rust's repr(C) ExceptionContext; arch/context.rs
+ * checks the full ExceptionFrame layout. Assembly saves/restores q0..q31 at
+ * 272..783, FPCR at 784 and FPSR at 792; returning Rust handlers retain them.
  * An exception can interrupt any instruction, so the ordinary AAPCS64
  * callee-saved subset is insufficient; preserve every 128-bit SIMD register.
  * SP_EL0 and FAR_EL1 follow at 800 and 808. The full 816-byte frame preserves

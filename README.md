@@ -11,8 +11,11 @@ in [docs/mmu.md](docs/mmu.md). Build it with `build_windows.ps1 -EnableMmu`;
 the default image keeps MMU and caches disabled.
 
 The optional [MMU -> EL0 path](docs/userspace.md) adds isolated user pages,
-SVC write/exit, protected stacks and fault/IRQ return with page reclamation.
+SVC write/exit/yield, protected stacks and fault/IRQ return with page reclamation.
 Build `kernel8-el0.img` with `build_windows.ps1 -EnableUserspace`.
+The [syscall contract](docs/abi/README.md) and
+[follow-up validation](docs/validation/M3-syscall.md) cover the shared dispatcher,
+complete user-buffer validation and current host/board verification status.
 
 Implementation milestones and acceptance gates are tracked in
 [docs/ROADMAP.md](docs/ROADMAP.md). Run

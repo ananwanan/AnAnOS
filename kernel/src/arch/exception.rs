@@ -5,19 +5,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 
-#[repr(C)]
-pub struct ExceptionContext {
-    pub registers: [u64; 31],
-    pub elr_el1: u64,
-    pub spsr_el1: u64,
-    pub esr_el1: u64,
-}
-
-// boot/vectors.S appends SIMD/FP and SP_EL0/FAR state after this 272-byte prefix.
-const _: () = assert!(core::mem::size_of::<ExceptionContext>() == 272);
-const _: () = assert!(core::mem::offset_of!(ExceptionContext, elr_el1) == 248);
-const _: () = assert!(core::mem::offset_of!(ExceptionContext, spsr_el1) == 256);
-const _: () = assert!(core::mem::offset_of!(ExceptionContext, esr_el1) == 264);
+pub use super::context::ExceptionContext;
 
 unsafe extern "C" {
     static __exception_vectors: u8;
@@ -152,7 +140,8 @@ pub fn disable_irq() {
     }
 }
 
-pub fn irq_is_masked() -> bool {
+/// Read the caller's original DAIF before diagnostic snapshots mask IRQ.
+pub fn daif() -> u64 {
     let daif: u64;
 
     unsafe {
@@ -163,8 +152,12 @@ pub fn irq_is_masked() -> bool {
         );
     }
 
+    daif
+}
+
+pub fn irq_is_masked() -> bool {
     /*
      * DAIF.I 是 bit 7。
      */
-    daif & (1 << 7) != 0
+    daif() & (1 << 7) != 0
 }
