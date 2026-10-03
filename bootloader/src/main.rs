@@ -87,6 +87,9 @@ pub extern "C" fn bootloader_main(dtb_address: usize) -> ! {
     let uart = MiniUart;
     uart.init();
     uart.write_string("\nANANOS UART BOOTLOADER READY\n");
+    if dtb_address == 0 {
+        uart.write_string("WARN DTB MISSING_OR_INVALID\n");
+    }
 
     loop {
         match receive_kernel(&uart) {

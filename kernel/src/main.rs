@@ -2,10 +2,13 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 mod arch;
 mod console;
 mod drivers;
 mod graphics;
+mod memory;
 mod test;
 
 use arch::timer::Timer;
@@ -60,10 +63,27 @@ pub extern "C" fn kernel_main(dtb_address: usize) -> ! {
 
     init_mailbox();
 
-    init_framebuffer();
+    let framebuffer_region = init_framebuffer();
 
     // 初始化异常向量
     arch::exception::init();
+
+    println!("DTB address : {dtb_address:#018x}");
+    // Firmware/bootloader provides the readable DTB; memory init excludes all
+    // firmware/kernel buffers before any page or heap allocation is possible.
+    match unsafe { memory::init(dtb_address, framebuffer_region) } {
+        Ok(stats) => {
+            println!("[ OK ] PHYSICAL PAGE ALLOCATOR");
+            println!("PAGES TOTAL   : {}", stats.total_pages);
+            println!("PAGES RESERVED: {}", stats.reserved_pages);
+            println!("PAGES USED    : {}", stats.allocated_pages);
+            println!("PAGES FREE    : {}", stats.free_pages);
+        }
+        Err(error) => {
+            println!("[FAIL] MEMORY INITIALIZATION: {error:?}");
+            println!("[INFO] Continuing UART/IRQ diagnostics");
+        }
+    }
 
     {
         // 测试定时器
@@ -181,12 +201,17 @@ fn init_mailbox() {
 }
 
 /// 初始化 Framebuffer 并绘制测试图案。
-fn init_framebuffer() {
+fn init_framebuffer() -> Option<memory::regions::Region> {
     println!();
     println!("Initializing framebuffer...");
 
     match FrameBuffer::new(1920, 1080) {
         Ok(framebuffer) => {
+            // Returned physical address and allocation size are authoritative.
+            let region = memory::regions::Region {
+                start: framebuffer.address(),
+                end: framebuffer.address() + framebuffer.size() as usize,
+            };
             // 安装前，这些日志只输出到 UART。
             println!("[ OK ] Framebuffer allocated");
             println!("Address    : {:#018x}", framebuffer.address());
@@ -225,11 +250,13 @@ fn init_framebuffer() {
             println!("PITCH       : 7680 BYTES");
             println!();
             println!("WELCOME TO ANANOS!");
+            Some(region)
         }
 
         Err(error) => {
             println!("[FAIL] Framebuffer initialization");
             println!("Error: {error:?}");
+            None
         }
     }
 }

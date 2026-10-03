@@ -85,3 +85,15 @@ I = 0
 ```
 
 AArch64 函数调用期间要求栈保持 16 字节对齐。
+
+## DTB 与物理内存
+
+UART bootloader 会在建栈、清 BSS、接收内核之前，把固件 DTB 复制到
+`bootloader/linker.ld` 定义的独立 256 KiB `NOLOAD` 区。链接断言确保
+bootloader、DTB 缓冲区和栈都不超过内核加载地址 `0x200000`。
+复制后的地址仍通过 `x20` / `x0` 传入 `kernel_main`。
+
+内核从 DTB 识别 RAM 和保留区，将 `[0, __kernel_end)` 连同 DTB、固件
+VideoCore/framebuffer 和 MMIO 排除后，再初始化物理页分配器和内核堆。
+`__kernel_end` 包含 BSS 中的页位图与 64 KiB 栈。
+详见 [内存设计说明](../docs/memory.md)。

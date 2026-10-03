@@ -2,6 +2,10 @@
 
 A tiny operating system written in Rust for Raspberry Pi 4.
 
+Physical RAM discovery, reservations, the 4 KiB page allocator and the 1 MiB
+kernel heap are described in [docs/memory.md](docs/memory.md), including host
+tests and the separate Raspberry Pi hardware verification steps.
+
 Current Target:
 
 - Raspberry Pi 4B

@@ -284,7 +284,7 @@ Avoid:
 - dependencies that require an OS;
 - adding crates without checking `no_std` support and whether the dependency is actually necessary.
 
-There is currently no general-purpose allocator. Do not write code that assumes `Vec`, `String`, `Box`, or other allocation-backed types are available.
+The kernel has a 1 MiB general-purpose heap initialized after DTB-based RAM/reservation discovery and physical page allocation. Use `Vec`, `String`, `Box`, and other allocation-backed types only after successful `memory::init`; prefer fallible allocation for recoverable failures. Early boot, DTB parsing, and physical page bookkeeping must remain allocation-free. See `docs/memory.md` for ownership, capacity, and CPU0/IRQ synchronization constraints.
 
 ## Assembly rules
 
